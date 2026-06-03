@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 记账本</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">￥</div>
+          <div>
+            <h1>AI 记账本</h1>
+            <p>个人财务管理系统</p>
+          </div>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="dashboard">总览</button>
+          <button class="nav-item" data-view="records">账单</button>
+          <button class="nav-item" data-view="budget">预算</button>
+          <button class="nav-item" data-view="ai">AI 报告</button>
+        </nav>
+        <div class="user-card">
+          <span class="status-dot"></span>
+          <div>
+            <strong id="currentUserName">演示用户</strong>
+            <p>本地演示模式</p>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Personal Finance</p>
+            <h2 id="viewTitle">财务总览</h2>
+          </div>
+          <div class="month-switcher">
+            <button id="prevMonth" title="上个月">‹</button>
+            <input id="monthInput" type="month" />
+            <button id="nextMonth" title="下个月">›</button>
+          </div>
+        </header>
+
+        <section class="view active" id="dashboardView">
+          <div class="metric-grid">
+            <article class="metric">
+              <span>本月收入</span>
+              <strong id="incomeMetric">￥0.00</strong>
+            </article>
+            <article class="metric">
+              <span>本月支出</span>
+              <strong id="expenseMetric">￥0.00</strong>
+            </article>
+            <article class="metric">
+              <span>本月结余</span>
+              <strong id="balanceMetric">￥0.00</strong>
+            </article>
+            <article class="metric">
+              <span>预算使用率</span>
+              <strong id="budgetMetric">0%</strong>
+            </article>
+          </div>
+
+          <div class="content-grid">
+            <section class="panel">
+              <div class="panel-header">
+                <h3>分类支出</h3>
+                <span id="categoryHint">按本月支出统计</span>
+              </div>
+              <div id="categoryBars" class="bar-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h3>最近账单</h3>
+                <span>按时间倒序</span>
+              </div>
+              <div id="recentRecords" class="record-list compact"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="recordsView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <h3>新增账单</h3>
+                <span id="classifyPreview">自动分类待输入</span>
+              </div>
+              <form id="recordForm" class="record-form">
+                <label>
+                  类型
+                  <select id="typeInput">
+                    <option value="expense">支出</option>
+                    <option value="income">收入</option>
+                  </select>
+                </label>
+                <label>
+                  金额
+                  <input id="amountInput" type="number" min="0.01" step="0.01" placeholder="例如 25.5" required />
+                </label>
+                <label>
+                  分类
+                  <select id="categoryInput"></select>
+                </label>
+                <label>
+                  日期
+                  <input id="dateInput" type="date" required />
+                </label>
+                <label class="full">
+                  备注
+                  <input id="remarkInput" type="text" placeholder="例如 午饭外卖、地铁、工资" />
+                </label>
+                <button class="primary-btn" type="submit">保存账单</button>
+              </form>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h3>账单明细</h3>
+                <select id="filterType">
+                  <option value="all">全部类型</option>
+                  <option value="expense">支出</option>
+                  <option value="income">收入</option>
+                </select>
+              </div>
+              <div id="recordList" class="record-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="budgetView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <h3>设置预算</h3>
+                <span>按月份保存</span>
+              </div>
+              <form id="budgetForm" class="budget-form">
+                <label>
+                  月度总预算
+                  <input id="budgetInput" type="number" min="0" step="100" />
+                </label>
+                <button class="primary-btn" type="submit">保存预算</button>
+              </form>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h3>预算进度</h3>
+                <span id="budgetStatusText">暂无预算</span>
+              </div>
+              <div class="budget-ring">
+                <div class="ring" id="budgetRing">0%</div>
+                <div>
+                  <p id="budgetDetail">设置预算后可查看使用进度。</p>
+                  <p id="budgetAdvice" class="muted">建议先设置一个符合本月计划的总预算。</p>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="aiView">
+          <section class="panel report-panel">
+            <div class="panel-header">
+              <h3>AI 月度财务报告</h3>
+              <button id="generateReportBtn" class="primary-btn" type="button">生成报告</button>
+            </div>
+            <div id="aiReport" class="ai-report">
+              <p>请选择月份后生成报告。系统会根据本月收支、分类占比和预算使用率输出本地规则版分析。</p>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
