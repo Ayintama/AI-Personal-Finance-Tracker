@@ -1,11 +1,8 @@
-const STORAGE_KEY = "ai-finance-tracker-state";
+const API_BASE = "http://127.0.0.1:8080";
+const SESSION_KEY = "ai-finance-session";
+const UI_KEY = "ai-finance-ui";
 
-const categories = {
-  expense: ["餐饮", "交通", "购物", "学习", "娱乐", "医疗", "住房", "其他"],
-  income: ["工资", "奖金", "兼职", "报销", "理财", "其他收入"],
-};
-
-const classifyRules = [
+const localClassifyRules = [
   { type: "expense", category: "餐饮", keywords: ["饭", "餐", "外卖", "奶茶", "咖啡", "火锅", "早餐", "午餐", "晚餐"] },
   { type: "expense", category: "交通", keywords: ["地铁", "公交", "打车", "滴滴", "高铁", "机票", "出租"] },
   { type: "expense", category: "购物", keywords: ["淘宝", "京东", "购物", "衣服", "数码", "超市"] },
@@ -20,35 +17,28 @@ const classifyRules = [
   { type: "income", category: "理财", keywords: ["利息", "基金", "分红"] },
 ];
 
-function createId() {
-  if (window.crypto && typeof window.crypto.randomUUID === "function") {
-    return window.crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
+let state = {
+  token: "",
+  user: null,
+  selectedMonth: getCurrentMonth(),
+  records: [],
+  categories: [],
+  summary: emptySummary(),
+  report: null,
+};
 
-function pad(value) {
-  return String(value).padStart(2, "0");
-}
-
-function formatDate(date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-function formatMonth(date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
-}
-
-const initialRecords = [
-  { id: createId(), type: "income", amount: 5200, category: "工资", date: getToday(), remark: "本月工资" },
-  { id: createId(), type: "expense", amount: 32, category: "餐饮", date: getToday(), remark: "午饭外卖" },
-  { id: createId(), type: "expense", amount: 8, category: "交通", date: getToday(), remark: "地铁通勤" },
-  { id: createId(), type: "expense", amount: 168, category: "购物", date: getToday(), remark: "超市日用品" },
-];
-
-let state = loadState();
+const selectedRecordIds = new Set();
 
 const els = {
+  authPanel: document.querySelector("#authPanel"),
+  authForm: document.querySelector("#authForm"),
+  authUsername: document.querySelector("#authUsername"),
+  authPassword: document.querySelector("#authPassword"),
+  authEmail: document.querySelector("#authEmail"),
+  authMessage: document.querySelector("#authMessage"),
+  logoutBtn: document.querySelector("#logoutBtn"),
+  currentUserName: document.querySelector("#currentUserName"),
+  apiStatus: document.querySelector("#apiStatus"),
   navItems: document.querySelectorAll(".nav-item"),
   views: document.querySelectorAll(".view"),
   viewTitle: document.querySelector("#viewTitle"),
@@ -70,6 +60,13 @@ const els = {
   classifyPreview: document.querySelector("#classifyPreview"),
   filterType: document.querySelector("#filterType"),
   recordList: document.querySelector("#recordList"),
+  selectAllRecords: document.querySelector("#selectAllRecords"),
+  selectedCount: document.querySelector("#selectedCount"),
+  bulkDeleteBtn: document.querySelector("#bulkDeleteBtn"),
+  downloadTemplateBtn: document.querySelector("#downloadTemplateBtn"),
+  exportExcelBtn: document.querySelector("#exportExcelBtn"),
+  importFileInput: document.querySelector("#importFileInput"),
+  importStatus: document.querySelector("#importStatus"),
   budgetForm: document.querySelector("#budgetForm"),
   budgetInput: document.querySelector("#budgetInput"),
   budgetRing: document.querySelector("#budgetRing"),
@@ -80,6 +77,18 @@ const els = {
   aiReport: document.querySelector("#aiReport"),
 };
 
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatDate(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatMonth(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}`;
+}
+
 function getToday() {
   return formatDate(new Date());
 }
@@ -88,67 +97,287 @@ function getCurrentMonth() {
   return formatMonth(new Date());
 }
 
-function loadState() {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    return JSON.parse(saved);
-  }
+function emptySummary() {
   return {
-    selectedMonth: getCurrentMonth(),
-    records: initialRecords,
-    budgets: { [getCurrentMonth()]: 3500 },
+    income: 0,
+    expense: 0,
+    balance: 0,
+    budget: null,
+    category_totals: {},
   };
 }
 
-function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function loadSession() {
+  const saved = localStorage.getItem(SESSION_KEY);
+  if (saved) {
+    try {
+      const session = JSON.parse(saved);
+      state.token = session.token || "";
+      state.user = session.user || null;
+    } catch {
+      localStorage.removeItem(SESSION_KEY);
+    }
+  }
+
+  const ui = localStorage.getItem(UI_KEY);
+  if (ui) {
+    try {
+      state.selectedMonth = JSON.parse(ui).selectedMonth || getCurrentMonth();
+    } catch {
+      state.selectedMonth = getCurrentMonth();
+    }
+  }
+}
+
+function saveSession() {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ token: state.token, user: state.user }));
+}
+
+function saveUiState() {
+  localStorage.setItem(UI_KEY, JSON.stringify({ selectedMonth: state.selectedMonth }));
 }
 
 function formatMoney(value) {
   return `￥${Number(value || 0).toFixed(2)}`;
 }
 
-function monthRecords() {
-  return state.records.filter((record) => record.date.startsWith(state.selectedMonth));
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
-function getSummary() {
-  const records = monthRecords();
-  const income = records.filter((item) => item.type === "income").reduce((sum, item) => sum + item.amount, 0);
-  const expense = records.filter((item) => item.type === "expense").reduce((sum, item) => sum + item.amount, 0);
-  const budget = Number(state.budgets[state.selectedMonth] || 0);
-  const categoryTotals = records
-    .filter((item) => item.type === "expense")
-    .reduce((acc, item) => {
-      acc[item.category] = (acc[item.category] || 0) + item.amount;
-      return acc;
-    }, {});
+function normalizeType(value) {
+  const text = String(value || "").replace(/^\uFEFF/, "").trim().toLowerCase();
+  if (["income", "收入", "收", "+"].includes(text)) return "income";
+  if (["expense", "支出", "支", "-"].includes(text)) return "expense";
+  return "";
+}
 
+function normalizeDate(value) {
+  const text = String(value || "").replace(/^\uFEFF/, "").trim();
+  const dateOnly = text.split(/\s+/)[0];
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(text)) {
+    const [year, month, day] = text.split("-");
+    return `${year}-${pad(month)}-${pad(day)}`;
+  }
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(dateOnly)) {
+    const [year, month, day] = dateOnly.split("-");
+    return `${year}-${pad(month)}-${pad(day)}`;
+  }
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(text)) {
+    const [year, month, day] = text.split("/");
+    return `${year}-${pad(month)}-${pad(day)}`;
+  }
+  if (/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(dateOnly)) {
+    const [year, month, day] = dateOnly.split("/");
+    return `${year}-${pad(month)}-${pad(day)}`;
+  }
+  return "";
+}
+
+function toDateTime(date) {
+  return `${date} 12:00:00`;
+}
+
+function fromBackendRecord(item) {
   return {
-    records,
-    income,
-    expense,
-    balance: income - expense,
-    budget,
-    budgetUsage: budget > 0 ? Math.round((expense / budget) * 100) : 0,
-    categoryTotals,
+    id: item.id,
+    type: item.type,
+    amount: Number(item.amount),
+    categoryId: item.category_id,
+    category: item.category_name,
+    date: String(item.occurred_at || "").slice(0, 10),
+    occurredAt: item.occurred_at,
+    remark: item.remark || "",
   };
 }
 
-function classifyRecord(type, remark) {
-  const text = String(remark || "").trim();
-  const matched = classifyRules.find((rule) => rule.type === type && rule.keywords.some((keyword) => text.includes(keyword)));
-  return matched
-    ? { category: matched.category, confidence: 0.9, source: "rule" }
-    : { category: type === "income" ? "其他收入" : "其他", confidence: 0.4, source: "fallback" };
+function monthRecords() {
+  return state.records;
 }
 
-function updateCategoryOptions() {
+function getSummary() {
+  const budget = state.summary.budget;
+  const budgetAmount = budget ? Number(budget.amount) : 0;
+  const expense = Number(state.summary.expense || 0);
+  return {
+    records: state.records,
+    income: Number(state.summary.income || 0),
+    expense,
+    balance: Number(state.summary.balance || 0),
+    budget: budgetAmount,
+    budgetUsage: budgetAmount > 0 ? Math.round((expense / budgetAmount) * 100) : 0,
+    categoryTotals: Object.fromEntries(
+      Object.entries(state.summary.category_totals || {}).map(([name, amount]) => [name, Number(amount)]),
+    ),
+  };
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (state.token) {
+    headers.Authorization = `Bearer ${state.token}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch {
+    throw new Error("连接后端失败，请确认 backend 已启动并监听 http://127.0.0.1:8080。");
+  }
+
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error("后端返回格式异常，请检查服务日志。");
+  }
+  if (!response.ok || (payload && payload.code !== 0)) {
+    const message = payload?.message || `请求失败：${response.status}`;
+    if (response.status === 401 || payload?.code === 4002) {
+      clearSession();
+    }
+    throw new Error(message);
+  }
+  return payload?.data;
+}
+
+async function login(username, password) {
+  const data = await apiRequest("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  state.token = data.token;
+  state.user = data.user;
+  saveSession();
+}
+
+async function register(username, password, email) {
+  const body = { username, password };
+  if (email) body.email = email;
+  const data = await apiRequest("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  state.token = data.token;
+  state.user = data.user;
+  saveSession();
+}
+
+function clearSession() {
+  state.token = "";
+  state.user = null;
+  state.records = [];
+  state.categories = [];
+  state.summary = emptySummary();
+  state.report = null;
+  selectedRecordIds.clear();
+  localStorage.removeItem(SESSION_KEY);
+  renderAll();
+}
+
+async function refreshData() {
+  if (!state.token) {
+    renderAll();
+    return;
+  }
+  els.apiStatus.textContent = "正在同步后端数据";
+  try {
+    const [categories, transactions, summary] = await Promise.all([
+      apiRequest("/api/categories"),
+      apiRequest(`/api/transactions?month=${encodeURIComponent(state.selectedMonth)}&page_size=100`),
+      apiRequest(`/api/statistics/monthly?month=${encodeURIComponent(state.selectedMonth)}`),
+    ]);
+    state.categories = categories || [];
+    state.records = (transactions?.items || []).map(fromBackendRecord);
+    selectedRecordIds.clear();
+    state.summary = summary || emptySummary();
+    state.report = null;
+    renderAll();
+    els.apiStatus.textContent = "已连接后端";
+  } catch (error) {
+    els.apiStatus.textContent = "后端同步失败";
+    throw error;
+  }
+}
+
+function categoriesByType(type) {
+  return state.categories.filter((category) => category.type === type);
+}
+
+function localClassify(type, remark) {
+  const text = String(remark || "").trim();
+  const matched = localClassifyRules.find((rule) => rule.type === type && rule.keywords.some((keyword) => text.includes(keyword)));
+  const fallbackName = type === "income" ? "其他收入" : "其他";
+  const categoryName = matched?.category || fallbackName;
+  const category = categoriesByType(type).find((item) => item.name === categoryName) || categoriesByType(type)[0];
+  return {
+    category,
+    categoryName: category?.name || categoryName,
+    source: matched ? "rule" : "fallback",
+  };
+}
+
+async function classifyRecord(type, remark, amount = 0) {
+  if (state.token && remark) {
+    try {
+      const data = await apiRequest("/api/ai/classify", {
+        method: "POST",
+        body: JSON.stringify({ remark, amount: String(amount || 0), type }),
+      });
+      const category = state.categories.find((item) => item.id === data.category_id);
+      if (category) {
+        return { category, categoryName: category.name, source: data.source || "api" };
+      }
+    } catch {
+      // Keep the form usable if the classify endpoint is temporarily unavailable.
+    }
+  }
+  return localClassify(type, remark);
+}
+
+async function ensureCategory(type, categoryName, remark, amount = 0) {
+  const category = categoriesByType(type).find((item) => item.name === String(categoryName || "").trim());
+  if (category) return category;
+  const result = await classifyRecord(type, remark, amount);
+  return result.category || categoriesByType(type)[0];
+}
+
+async function updateCategoryOptions() {
+  if (!els.typeInput || !els.categoryInput || !els.classifyPreview) return;
   const type = els.typeInput.value;
-  const result = classifyRecord(type, els.remarkInput.value);
-  els.categoryInput.innerHTML = categories[type].map((name) => `<option value="${name}">${name}</option>`).join("");
-  els.categoryInput.value = result.category;
-  els.classifyPreview.textContent = `推荐分类：${result.category}（${result.source === "rule" ? "规则命中" : "默认分类"}）`;
+  const options = categoriesByType(type);
+  els.categoryInput.innerHTML = options.map((item) => `<option value="${item.id}">${item.name}</option>`).join("");
+
+  if (!options.length) {
+    els.classifyPreview.textContent = state.token ? "暂无分类，请检查后端分类数据" : "请先登录后加载分类";
+    return;
+  }
+
+  const result = await classifyRecord(type, els.remarkInput.value, Number(els.amountInput.value || 0));
+  if (result.category) {
+    els.categoryInput.value = String(result.category.id);
+  }
+  els.classifyPreview.textContent = `推荐分类：${result.categoryName}（${result.source === "rule" ? "规则命中" : result.source === "api" ? "后端接口" : "默认分类"}）`;
+}
+
+function renderAuthState() {
+  const loggedIn = Boolean(state.token && state.user);
+  els.authPanel.classList.toggle("hidden", loggedIn);
+  els.logoutBtn.classList.toggle("hidden", !loggedIn);
+  els.currentUserName.textContent = loggedIn ? state.user.username : "未登录";
+  els.apiStatus.textContent = loggedIn ? "已连接后端" : "请先登录";
 }
 
 function renderMetrics() {
@@ -164,6 +393,10 @@ function renderCategoryBars() {
   const entries = Object.entries(summary.categoryTotals).sort((a, b) => b[1] - a[1]);
   const max = Math.max(...entries.map(([, amount]) => amount), 1);
 
+  if (!state.token) {
+    els.categoryBars.innerHTML = `<div class="empty">登录后查看分类支出。</div>`;
+    return;
+  }
   if (entries.length === 0) {
     els.categoryBars.innerHTML = `<div class="empty">本月还没有支出记录。</div>`;
     return;
@@ -174,7 +407,7 @@ function renderCategoryBars() {
       const width = Math.max(6, Math.round((amount / max) * 100));
       return `
         <div class="bar-row">
-          <strong>${name}</strong>
+          <strong>${escapeHtml(name)}</strong>
           <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
           <span>${formatMoney(amount)}</span>
         </div>
@@ -189,28 +422,65 @@ function renderRecords() {
     .filter((record) => filter === "all" || record.type === filter)
     .sort((a, b) => b.date.localeCompare(a.date));
 
-  els.recordList.innerHTML = records.length ? records.map(renderRecordItem).join("") : `<div class="empty">当前筛选条件下暂无账单。</div>`;
+  const visibleIds = new Set(records.map((record) => String(record.id)));
+  [...selectedRecordIds].forEach((id) => {
+    if (!visibleIds.has(id)) selectedRecordIds.delete(id);
+  });
+
+  els.recordList.innerHTML = records.length ? records.map((record) => renderRecordItem(record, true)).join("") : `<div class="empty">${state.token ? "当前筛选条件下暂无账单。" : "登录后查看账单明细。"}</div>`;
   els.recentRecords.innerHTML = records.slice(0, 5).length
-    ? records.slice(0, 5).map(renderRecordItem).join("")
-    : `<div class="empty">本月还没有账单。</div>`;
+    ? records.slice(0, 5).map((record) => renderRecordItem(record, false)).join("")
+    : `<div class="empty">${state.token ? "本月还没有账单。" : "登录后查看最近账单。"}</div>`;
+  updateBulkDeleteControls(records);
 
   document.querySelectorAll("[data-delete-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.records = state.records.filter((record) => record.id !== button.dataset.deleteId);
-      saveState();
-      renderAll();
+    button.addEventListener("click", async () => {
+      try {
+        await apiRequest(`/api/transactions/${button.dataset.deleteId}`, { method: "DELETE" });
+        await refreshData();
+      } catch (error) {
+        els.importStatus.textContent = error.message;
+      }
+    });
+  });
+
+  document.querySelectorAll("[data-select-id]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedRecordIds.add(checkbox.dataset.selectId);
+      } else {
+        selectedRecordIds.delete(checkbox.dataset.selectId);
+      }
+      updateBulkDeleteControls(records);
     });
   });
 }
 
-function renderRecordItem(record) {
+function updateBulkDeleteControls(records = []) {
+  if (!els.selectAllRecords || !els.selectedCount || !els.bulkDeleteBtn) return;
+  const visibleIds = records.map((record) => String(record.id));
+  const selectedVisibleCount = visibleIds.filter((id) => selectedRecordIds.has(id)).length;
+  els.selectedCount.textContent = `已选 ${selectedVisibleCount} 条`;
+  els.bulkDeleteBtn.disabled = selectedVisibleCount === 0;
+  els.selectAllRecords.disabled = visibleIds.length === 0;
+  els.selectAllRecords.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+  els.selectAllRecords.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+}
+
+function renderRecordItem(record, selectable = false) {
   const sign = record.type === "income" ? "+" : "-";
   const amountClass = record.type === "income" ? "amount-income" : "amount-expense";
+  const recordId = String(record.id);
   return `
     <article class="record-item">
+      ${selectable ? `
+        <label class="record-check" title="选择账单">
+          <input data-select-id="${escapeHtml(recordId)}" type="checkbox" ${selectedRecordIds.has(recordId) ? "checked" : ""} />
+        </label>
+      ` : ""}
       <div>
-        <strong>${record.category} · ${record.remark || "无备注"}</strong>
-        <p>${record.date} · ${record.type === "income" ? "收入" : "支出"}</p>
+        <strong>${escapeHtml(record.category)} · ${escapeHtml(record.remark || "无备注")}</strong>
+        <p>${escapeHtml(record.date)} · ${record.type === "income" ? "收入" : "支出"}</p>
       </div>
       <div>
         <strong class="${amountClass}">${sign}${formatMoney(record.amount)}</strong>
@@ -230,6 +500,12 @@ function renderBudget() {
     ? `conic-gradient(${summary.budgetUsage > 100 ? "var(--danger)" : "var(--accent)"} ${usage * 3.6}deg, #e4ece6 0deg)`
     : "conic-gradient(var(--accent) 0deg, #e4ece6 0deg)";
 
+  if (!state.token) {
+    els.budgetStatusText.textContent = "未登录";
+    els.budgetDetail.textContent = "登录后可同步后端预算。";
+    els.budgetAdvice.textContent = "请先登录测试账号或注册新账号。";
+    return;
+  }
   if (!summary.budget) {
     els.budgetStatusText.textContent = "暂无预算";
     els.budgetDetail.textContent = "设置预算后可查看使用进度。";
@@ -248,44 +524,227 @@ function renderBudget() {
         : "预算使用情况健康，可以继续保持。";
 }
 
-function generateReport() {
-  const summary = getSummary();
-  const topCategory = Object.entries(summary.categoryTotals).sort((a, b) => b[1] - a[1])[0];
-  const suggestions = [];
+async function generateReport() {
+  if (!state.token) {
+    els.aiReport.innerHTML = `<p>请先登录后生成报告。</p>`;
+    return;
+  }
+  try {
+    const report = await apiRequest("/api/ai/report", {
+      method: "POST",
+      body: JSON.stringify({ month: state.selectedMonth }),
+    });
+    state.report = report;
+    els.aiReport.innerHTML = `
+      <h4>${escapeHtml(report.month)} 财务总结</h4>
+      <p>本月收入 ${formatMoney(report.income)}，支出 ${formatMoney(report.expense)}，结余 ${formatMoney(report.balance)}。</p>
+      <p>最高支出类别：${escapeHtml(report.top_category || "暂无")}。${report.generated_by_ai ? "由 AI 服务生成。" : "由本地规则生成。"}</p>
+      <h4>优化建议</h4>
+      <ul>${(report.suggestions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+    `;
+  } catch (error) {
+    els.aiReport.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+  }
+}
 
-  if (summary.expense === 0) {
-    suggestions.push("本月暂无支出记录，可以先补充日常账单以获得更准确的分析。");
-  }
-  if (topCategory) {
-    suggestions.push(`${topCategory[0]} 是本月最高支出类别，金额为 ${formatMoney(topCategory[1])}，建议检查是否存在可减少的非必要消费。`);
-  }
-  if (summary.budget && summary.budgetUsage >= 80) {
-    suggestions.push(`预算使用率为 ${summary.budgetUsage}%，建议在月底前控制额外支出。`);
-  }
-  if (summary.balance > 0) {
-    suggestions.push(`本月结余为 ${formatMoney(summary.balance)}，可以考虑将部分结余用于储蓄或学习投入。`);
-  }
-  if (suggestions.length < 2) {
-    suggestions.push("建议保持每笔消费都添加备注，后续自动分类会更准确。");
-  }
+function buildWorkbookHtml(rows, title) {
+  const bodyRows = rows
+    .map(
+      (record) => `
+        <tr>
+          <td>${escapeHtml(record.date)}</td>
+          <td>${record.type === "income" ? "收入" : "支出"}</td>
+          <td>${escapeHtml(record.category)}</td>
+          <td>${Number(record.amount).toFixed(2)}</td>
+          <td>${escapeHtml(record.remark)}</td>
+        </tr>
+      `,
+    )
+    .join("");
 
-  els.aiReport.innerHTML = `
-    <h4>${state.selectedMonth} 财务总结</h4>
-    <p>本月收入 ${formatMoney(summary.income)}，支出 ${formatMoney(summary.expense)}，结余 ${formatMoney(summary.balance)}。</p>
-    <p>${summary.budget ? `月度预算为 ${formatMoney(summary.budget)}，当前预算使用率 ${summary.budgetUsage}%。` : "本月尚未设置预算。"}</p>
-    <h4>消费重点</h4>
-    <p>${topCategory ? `支出最高的分类是 ${topCategory[0]}，占本月支出的 ${Math.round((topCategory[1] / summary.expense) * 100)}%。` : "暂无支出分类数据。"}</p>
-    <h4>优化建议</h4>
-    <ul>${suggestions.map((item) => `<li>${item}</li>`).join("")}</ul>
+  return `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+      <head>
+        <meta charset="UTF-8" />
+        <style>
+          table { border-collapse: collapse; }
+          th, td { border: 1px solid #999; padding: 6px 10px; }
+          th { background: #eaf3ef; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <h3>${escapeHtml(title)}</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>日期</th>
+              <th>类型</th>
+              <th>分类</th>
+              <th>金额</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </body>
+    </html>
   `;
+}
+
+function downloadFile(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportCurrentMonthExcel() {
+  const rows = monthRecords().sort((a, b) => b.date.localeCompare(a.date));
+  if (!rows.length) {
+    els.importStatus.textContent = "本月暂无账单可导出。";
+    return;
+  }
+  const html = buildWorkbookHtml(rows, `${state.selectedMonth} 账单明细`);
+  downloadFile(html, `AI记账本-${state.selectedMonth}-账单.xls`, "application/vnd.ms-excel;charset=utf-8");
+  els.importStatus.textContent = `已导出 ${rows.length} 条本月账单。`;
+}
+
+function downloadTemplate() {
+  const rows = [
+    { date: getToday(), type: "expense", category: "餐饮", amount: 25.5, remark: "午饭外卖" },
+    { date: getToday(), type: "income", category: "工资", amount: 5200, remark: "本月工资" },
+  ];
+  const html = buildWorkbookHtml(rows, "AI 记账本导入模板");
+  downloadFile(html, "AI记账本-导入模板.xls", "application/vnd.ms-excel;charset=utf-8");
+  els.importStatus.textContent = "已下载导入模板，按表头填写后可重新上传。";
+}
+
+function splitCsvLine(line) {
+  const cells = [];
+  let current = "";
+  let inQuotes = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+function parseCsv(text) {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map(splitCsvLine);
+}
+
+function parseHtmlTable(text) {
+  const doc = new DOMParser().parseFromString(text, "text/html");
+  const rows = [...doc.querySelectorAll("table tr")];
+  return rows.map((row) => [...row.children].map((cell) => cell.textContent.trim())).filter((row) => row.length);
+}
+
+async function parseImportedRows(matrix) {
+  if (matrix.length < 2) return [];
+  const headers = matrix[0].map((item) => String(item).replace(/^\uFEFF/, "").trim());
+  const indexOf = (...names) => headers.findIndex((header) => names.includes(header));
+  const dateIndex = indexOf("日期", "时间", "交易时间", "date", "Date", "time", "Time");
+  const typeIndex = indexOf("类型", "type", "Type");
+  const categoryIndex = indexOf("分类", "category", "Category");
+  const amountIndex = indexOf("金额", "amount", "Amount");
+  const remarkIndex = indexOf("备注", "remark", "Remark", "说明");
+
+  if (dateIndex < 0 || typeIndex < 0 || amountIndex < 0) {
+    if (dateIndex < 0 || amountIndex < 0) {
+      throw new Error("表头至少需要包含：时间、金额；建议同时包含分类。");
+    }
+  }
+
+  const rows = [];
+  for (const row of matrix.slice(1)) {
+    const rawAmount = Number(String(row[amountIndex] || "").replace(/[￥,\s]/g, ""));
+    const rawCategory = categoryIndex >= 0 ? String(row[categoryIndex] || "").replace(/^\uFEFF/, "").trim() : "";
+    const categoryType = state.categories.find((item) => item.name === rawCategory)?.type;
+    const type = typeIndex >= 0
+      ? normalizeType(row[typeIndex])
+      : categoryType || (rawAmount < 0 ? "expense" : "expense");
+    const date = normalizeDate(row[dateIndex]);
+    const amount = Math.abs(rawAmount);
+    const remark = remarkIndex >= 0 ? String(row[remarkIndex] || "").trim() : "";
+    if (!type || !date || !Number.isFinite(amount) || amount <= 0) continue;
+    const category = await ensureCategory(type, rawCategory, remark, amount);
+    if (!category) continue;
+    rows.push({ type, amount, categoryId: category.id, category: category.name, date, remark });
+  }
+  return rows;
+}
+
+async function importTableFile(file) {
+  if (!state.token) {
+    els.importStatus.textContent = "请先登录后再导入账单。";
+    return;
+  }
+  const extension = file.name.split(".").pop().toLowerCase();
+  if (extension === "xlsx") {
+    els.importStatus.textContent = "当前无依赖版本暂不支持 .xlsx，请使用模板 .xls 或 .csv。";
+    return;
+  }
+
+  const text = await file.text();
+  const matrix = extension === "csv" ? parseCsv(text) : parseHtmlTable(text);
+  els.importStatus.textContent = "正在解析表格...";
+  const imported = await parseImportedRows(matrix);
+  if (!imported.length) {
+    els.importStatus.textContent = "没有识别到有效账单，请检查时间、金额是否有值。";
+    return;
+  }
+
+  els.importStatus.textContent = `识别到 ${imported.length} 条账单，正在导入...`;
+  let count = 0;
+  for (const row of imported) {
+    await apiRequest("/api/transactions", {
+      method: "POST",
+      body: JSON.stringify({
+        category_id: row.categoryId,
+        amount: String(row.amount),
+        type: row.type,
+        occurred_at: toDateTime(row.date),
+        remark: row.remark,
+      }),
+    });
+    count += 1;
+    if (count % 25 === 0 || count === imported.length) {
+      els.importStatus.textContent = `正在导入 ${count} / ${imported.length} 条账单...`;
+    }
+  }
+  els.importStatus.textContent = `已导入 ${count} 条账单到后端。`;
+  await refreshData();
 }
 
 function renderAll() {
   els.monthInput.value = state.selectedMonth;
+  renderAuthState();
   renderMetrics();
   renderCategoryBars();
   renderRecords();
   renderBudget();
+  updateCategoryOptions();
 }
 
 function switchView(view) {
@@ -300,56 +759,156 @@ function switchView(view) {
   els.views.forEach((item) => item.classList.toggle("active", item.id === `${view}View`));
 }
 
-function changeMonth(offset) {
+async function changeMonth(offset) {
   const [year, month] = state.selectedMonth.split("-").map(Number);
   const date = new Date(year, month - 1 + offset, 1);
   state.selectedMonth = formatMonth(date);
-  saveState();
-  renderAll();
+  saveUiState();
+  await refreshData();
 }
 
 els.navItems.forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
 els.prevMonth.addEventListener("click", () => changeMonth(-1));
 els.nextMonth.addEventListener("click", () => changeMonth(1));
-els.monthInput.addEventListener("change", () => {
+els.monthInput.addEventListener("change", async () => {
   state.selectedMonth = els.monthInput.value;
-  saveState();
-  renderAll();
+  saveUiState();
+  await refreshData();
 });
 els.typeInput.addEventListener("change", updateCategoryOptions);
 els.remarkInput.addEventListener("input", updateCategoryOptions);
+els.amountInput.addEventListener("input", updateCategoryOptions);
 els.filterType.addEventListener("change", renderRecords);
+els.selectAllRecords.addEventListener("change", () => {
+  const filter = els.filterType.value;
+  const records = monthRecords()
+    .filter((record) => filter === "all" || record.type === filter)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  records.forEach((record) => {
+    const id = String(record.id);
+    if (els.selectAllRecords.checked) {
+      selectedRecordIds.add(id);
+    } else {
+      selectedRecordIds.delete(id);
+    }
+  });
+  renderRecords();
+});
+els.bulkDeleteBtn.addEventListener("click", async () => {
+  const ids = [...selectedRecordIds];
+  if (!ids.length) return;
+  const confirmed = window.confirm(`确定删除选中的 ${ids.length} 条账单吗？删除后不能恢复。`);
+  if (!confirmed) return;
+  els.bulkDeleteBtn.disabled = true;
+  els.selectedCount.textContent = `正在删除 ${ids.length} 条...`;
+  try {
+    let deleted = 0;
+    for (const id of ids) {
+      await apiRequest(`/api/transactions/${id}`, { method: "DELETE" });
+      deleted += 1;
+      els.selectedCount.textContent = `正在删除 ${deleted} / ${ids.length} 条...`;
+    }
+    selectedRecordIds.clear();
+    await refreshData();
+    els.importStatus.textContent = `已删除 ${ids.length} 条账单。`;
+  } catch (error) {
+    els.importStatus.textContent = error.message;
+    await refreshData();
+  }
+});
 els.generateReportBtn.addEventListener("click", generateReport);
+els.exportExcelBtn.addEventListener("click", exportCurrentMonthExcel);
+els.downloadTemplateBtn.addEventListener("click", downloadTemplate);
+els.logoutBtn.addEventListener("click", clearSession);
 
-els.recordForm.addEventListener("submit", (event) => {
+els.authForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const amount = Number(els.amountInput.value);
-  if (!Number.isFinite(amount) || amount <= 0) {
+  const action = event.submitter?.dataset.authAction || "login";
+  els.authMessage.textContent = action === "login" ? "正在登录..." : "正在注册...";
+  try {
+    if (action === "login") {
+      await login(els.authUsername.value.trim(), els.authPassword.value);
+    } else {
+      await register(els.authUsername.value.trim(), els.authPassword.value, els.authEmail.value.trim());
+    }
+    els.authMessage.textContent = "认证成功，正在加载后端数据...";
+    await refreshData();
+    els.authMessage.textContent = "登录成功，数据已同步。";
+  } catch (error) {
+    els.authMessage.textContent = error.message;
+  }
+});
+
+els.importFileInput.addEventListener("change", async () => {
+  const [file] = els.importFileInput.files;
+  if (!file) return;
+  try {
+    await importTableFile(file);
+  } catch (error) {
+    els.importStatus.textContent = error.message;
+  } finally {
+    els.importFileInput.value = "";
+  }
+});
+
+els.recordForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.token) {
+    els.importStatus.textContent = "请先登录后再保存账单。";
     return;
   }
-  state.records.push({
-    id: createId(),
-    type: els.typeInput.value,
-    amount,
-    category: els.categoryInput.value,
-    date: els.dateInput.value,
-    remark: els.remarkInput.value.trim(),
-  });
-  els.recordForm.reset();
-  els.dateInput.value = getToday();
-  updateCategoryOptions();
-  saveState();
-  renderAll();
+  const amount = Number(els.amountInput.value);
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  try {
+    await apiRequest("/api/transactions", {
+      method: "POST",
+      body: JSON.stringify({
+        category_id: Number(els.categoryInput.value),
+        amount: String(amount),
+        type: els.typeInput.value,
+        occurred_at: toDateTime(els.dateInput.value),
+        remark: els.remarkInput.value.trim(),
+      }),
+    });
+    els.recordForm.reset();
+    els.dateInput.value = getToday();
+    await refreshData();
+  } catch (error) {
+    els.importStatus.textContent = error.message;
+  }
 });
 
-els.budgetForm.addEventListener("submit", (event) => {
+els.budgetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  state.budgets[state.selectedMonth] = Number(els.budgetInput.value || 0);
-  saveState();
-  renderAll();
+  if (!state.token) return;
+  try {
+    await apiRequest("/api/budgets", {
+      method: "POST",
+      body: JSON.stringify({
+        category_id: null,
+        amount: String(Number(els.budgetInput.value || 0)),
+        month: state.selectedMonth,
+      }),
+    });
+    await refreshData();
+  } catch (error) {
+    els.budgetAdvice.textContent = error.message;
+  }
 });
 
-els.dateInput.value = getToday();
-els.monthInput.value = state.selectedMonth;
-updateCategoryOptions();
-renderAll();
+async function init() {
+  loadSession();
+  els.dateInput.value = getToday();
+  els.monthInput.value = state.selectedMonth;
+  renderAll();
+  if (state.token) {
+    try {
+      await refreshData();
+    } catch (error) {
+      els.authMessage.textContent = error.message;
+      renderAll();
+    }
+  }
+}
+
+init();

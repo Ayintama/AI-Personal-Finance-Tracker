@@ -25,13 +25,41 @@
         <div class="user-card">
           <span class="status-dot"></span>
           <div>
-            <strong id="currentUserName">演示用户</strong>
-            <p>本地演示模式</p>
+            <strong id="currentUserName">未登录</strong>
+            <p id="apiStatus">等待连接后端</p>
           </div>
+          <button id="logoutBtn" class="ghost-btn hidden" type="button">退出</button>
         </div>
       </aside>
 
       <main class="main">
+        <section class="auth-panel" id="authPanel">
+          <div>
+            <p class="eyebrow">Backend API</p>
+            <h2>登录后连接后端数据</h2>
+            <p class="muted">请先启动 backend，再使用测试账号登录。默认账号：test / test123456。</p>
+          </div>
+          <form id="authForm" class="auth-form">
+            <label>
+              用户名
+              <input id="authUsername" type="text" value="test" required />
+            </label>
+            <label>
+              密码
+              <input id="authPassword" type="password" value="test123456" required />
+            </label>
+            <label>
+              邮箱（注册时可填）
+              <input id="authEmail" type="email" placeholder="new@example.com" />
+            </label>
+            <div class="auth-actions">
+              <button class="primary-btn" type="submit" data-auth-action="login">登录</button>
+              <button class="secondary-btn" type="submit" data-auth-action="register">注册</button>
+            </div>
+            <p id="authMessage" class="muted">后端地址：http://127.0.0.1:8080</p>
+          </form>
+        </section>
+
         <header class="topbar">
           <div>
             <p class="eyebrow">Personal Finance</p>
@@ -83,6 +111,26 @@
         </section>
 
         <section class="view" id="recordsView">
+          <section class="panel import-export-panel">
+            <div class="panel-header">
+              <div>
+                <h3>表格导入 / 导出</h3>
+                <span>支持导出 Excel 可打开的 .xls，并导入 .csv / .xls 账单表</span>
+              </div>
+              <div class="toolbar">
+                <button id="downloadTemplateBtn" class="secondary-btn" type="button">下载模板</button>
+                <button id="exportExcelBtn" class="primary-btn" type="button">导出本月账单</button>
+              </div>
+            </div>
+            <div class="upload-row">
+              <label class="file-picker">
+                <input id="importFileInput" type="file" accept=".csv,.xls,.html,.xlsx" />
+                <span>选择表格文件</span>
+              </label>
+              <p id="importStatus" class="muted">支持表头：分类、时间、金额、账户、账本、货币、备注；账户/账本/货币会自动忽略。</p>
+            </div>
+          </section>
+
           <div class="split-layout">
             <section class="panel">
               <div class="panel-header">
@@ -120,11 +168,19 @@
             <section class="panel">
               <div class="panel-header">
                 <h3>账单明细</h3>
-                <select id="filterType">
-                  <option value="all">全部类型</option>
-                  <option value="expense">支出</option>
-                  <option value="income">收入</option>
-                </select>
+                <div class="record-tools">
+                  <label class="select-all-control">
+                    <input id="selectAllRecords" type="checkbox" />
+                    全选
+                  </label>
+                  <span id="selectedCount" class="muted">已选 0 条</span>
+                  <button id="bulkDeleteBtn" class="danger-btn" type="button" disabled>批量删除</button>
+                  <select id="filterType">
+                    <option value="all">全部类型</option>
+                    <option value="expense">支出</option>
+                    <option value="income">收入</option>
+                  </select>
+                </div>
               </div>
               <div id="recordList" class="record-list"></div>
             </section>
