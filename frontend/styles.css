@@ -590,3 +590,23 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* ===== validation ===== */
+.field-error {
+  display: block;
+  color: var(--danger);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.record-form input.input-error,
+.record-form select.input-error {
+  border-color: var(--danger);
+  outline: 1px solid var(--danger);
+}
+
+/* ===== chart containers ===== */
+.chart-container {
+  width: 100%;
+  min-height: 300px;
+}

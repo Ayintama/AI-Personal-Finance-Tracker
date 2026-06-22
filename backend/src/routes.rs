@@ -13,6 +13,24 @@ fn uid(req: &HttpRequest) -> Result<i64, AppError> {
     crate::response::get_user_id(req)
 }
 
+fn validate_month(month: &str) -> Result<(), AppError> {
+    if month.len() != 7 {
+        return Err(AppError::BadRequest("month 格式必须为 YYYY-MM".into()));
+    }
+    let bytes = month.as_bytes();
+    if bytes[4] != b'-'
+        || !bytes[0..4].iter().all(|c| c.is_ascii_digit())
+        || !bytes[5..7].iter().all(|c| c.is_ascii_digit())
+    {
+        return Err(AppError::BadRequest("month 格式必须为 YYYY-MM".into()));
+    }
+    let m: u32 = std::str::from_utf8(&bytes[5..7]).unwrap_or("0").parse().unwrap_or(0);
+    if m < 1 || m > 12 {
+        return Err(AppError::BadRequest("月份必须在 01-12 之间".into()));
+    }
+    Ok(())
+}
+
 // ========================= health =========================
 pub async fn health() -> HttpResponse {
     HttpResponse::Ok().json(json!({ "status": "ok" }))
@@ -218,6 +236,9 @@ pub async fn create_transaction(
     if body.amount <= Decimal::ZERO {
         return Err(AppError::BadRequest("金额必须大于 0".into()));
     }
+    if body.amount > Decimal::new(9999999, 2) {
+        return Err(AppError::BadRequest("金额超出最大限制 (9999999.99)".into()));
+    }
     if body.transaction_type != "income" && body.transaction_type != "expense" {
         return Err(AppError::BadRequest("type 必须是 income 或 expense".into()));
     }
@@ -264,6 +285,10 @@ pub async fn update_transaction(
 
     if amount <= Decimal::ZERO {
         return Err(AppError::BadRequest("金额必须大于 0".into()));
+    }
+
+    if amount > Decimal::new(9999999, 2) {
+        return Err(AppError::BadRequest("金额超出最大限制 (9999999.99)".into()));
     }
 
     if body.category_id.is_some() {
@@ -410,14 +435,31 @@ pub async fn monthly_statistics(
     let user_id = uid(&req)?;
     let month = q.month.clone();
 
-    let (income, expense) = data::month_summary(&state.pool, user_id, &month).await?;
-    let cats = data::category_expense_summary(&state.pool, user_id, &month).await?;
-    let total_budget = data::total_budget(&state.pool, user_id, &month).await?;
+    validate_month(&month)?;
 
-    // 构造分类 -> 金额 的 map
+    let (income, expense) = data::month_summary(&state.pool, user_id, &month).await?;
+    let expense_cats = data::category_expense_summary(&state.pool, user_id, &month).await?;
+    let income_cats = data::category_income_summary(&state.pool, user_id, &month).await?;
+    let total_budget = data::total_budget(&state.pool, user_id, &month).await?;
+    let max_expense = data::max_single_expense(&state.pool, user_id, &month).await?;
+    let tx_count = data::monthly_transaction_count(&state.pool, user_id, &month).await?;
+    let days = data::days_in_month(&month);
+    let daily_avg = if days > 0 && expense > Decimal::ZERO {
+        expense / Decimal::from(days)
+    } else {
+        Decimal::ZERO
+    };
+
+    // 支出分类 -> 金额
     let mut category_totals = serde_json::Map::new();
-    for (name, amt) in &cats {
+    for (name, amt) in &expense_cats {
         category_totals.insert(name.clone(), json!(amt));
+    }
+
+    // 收入分类 -> 金额
+    let mut income_category_totals = serde_json::Map::new();
+    for (name, amt) in &income_cats {
+        income_category_totals.insert(name.clone(), json!(amt));
     }
 
     let budget_json = if let Some(b) = total_budget {
@@ -442,7 +484,154 @@ pub async fn monthly_statistics(
         "balance": income - expense,
         "month": month,
         "category_totals": category_totals,
+        "income_category_totals": income_category_totals,
         "budget": budget_json,
+        "daily_avg_spending": daily_avg,
+        "max_expense": max_expense,
+        "transaction_count": tx_count,
+    }))))
+}
+
+// ========================= yearly / daily / trend =========================
+
+#[derive(Debug, Deserialize)]
+pub struct YearlyStatsQuery {
+    pub year: i32,
+}
+
+pub async fn yearly_statistics(
+    state: web::Data<data::AppState>,
+    req: HttpRequest,
+    q: web::Query<YearlyStatsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let user_id = uid(&req)?;
+    let year = q.year;
+
+    if year < 2000 || year > 2100 {
+        return Err(AppError::BadRequest("年份超出合理范围 (2000-2100)".into()));
+    }
+
+    let rows = data::yearly_summary(&state.pool, user_id, year).await?;
+
+    let mut data_map: std::collections::HashMap<String, (Decimal, Decimal)> = std::collections::HashMap::new();
+    for (mth, inc, exp) in &rows {
+        data_map.insert(mth.clone(), (*inc, *exp));
+    }
+
+    let mut months: Vec<serde_json::Value> = Vec::with_capacity(12);
+    let mut yearly_income = Decimal::ZERO;
+    let mut yearly_expense = Decimal::ZERO;
+
+    for m in 1..=12 {
+        let key = format!("{:04}-{:02}", year, m);
+        let (inc, exp) = data_map.get(&key).copied().unwrap_or((Decimal::ZERO, Decimal::ZERO));
+        yearly_income += inc;
+        yearly_expense += exp;
+        months.push(json!({
+            "month": key,
+            "income": inc,
+            "expense": exp,
+            "balance": inc - exp,
+        }));
+    }
+
+    Ok(HttpResponse::Ok().json(ApiResponse::success(json!({
+        "year": year,
+        "months": months,
+        "yearly_income": yearly_income,
+        "yearly_expense": yearly_expense,
+        "yearly_balance": yearly_income - yearly_expense,
+    }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DailyStatsQuery {
+    pub month: String,
+}
+
+pub async fn daily_statistics(
+    state: web::Data<data::AppState>,
+    req: HttpRequest,
+    q: web::Query<DailyStatsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let user_id = uid(&req)?;
+    let month = q.month.clone();
+
+    validate_month(&month)?;
+
+    let rows = data::daily_summary(&state.pool, user_id, &month).await?;
+
+    let mut data_map: std::collections::HashMap<String, (Decimal, Decimal)> = std::collections::HashMap::new();
+    for (dy, inc, exp) in &rows {
+        data_map.insert(dy.clone(), (*inc, *exp));
+    }
+
+    let parts: Vec<&str> = month.split('-').collect();
+    let y: i32 = parts[0].parse().unwrap_or(2024);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let total_days = data::days_in_month(&month);
+
+    let mut days: Vec<serde_json::Value> = Vec::with_capacity(total_days as usize);
+    for d in 1..=total_days {
+        let key = format!("{:04}-{:02}-{:02}", y, m, d);
+        let (inc, exp) = data_map.get(&key).copied().unwrap_or((Decimal::ZERO, Decimal::ZERO));
+        days.push(json!({
+            "date": key,
+            "income": inc,
+            "expense": exp,
+        }));
+    }
+
+    Ok(HttpResponse::Ok().json(ApiResponse::success(json!({
+        "month": month,
+        "days": days,
+        "total_days": total_days,
+    }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TrendStatsQuery {
+    pub months: Option<i32>,
+}
+
+pub async fn trend_statistics(
+    state: web::Data<data::AppState>,
+    req: HttpRequest,
+    q: web::Query<TrendStatsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let user_id = uid(&req)?;
+    let months = q.months.unwrap_or(6).max(1).min(24);
+
+    let rows = data::trend_summary(&state.pool, user_id, months).await?;
+
+    let mut data_map: std::collections::HashMap<String, (Decimal, Decimal)> = std::collections::HashMap::new();
+    for (mth, inc, exp) in &rows {
+        data_map.insert(mth.clone(), (*inc, *exp));
+    }
+
+    let start = data::months_ago(months);
+    let parts: Vec<&str> = start.split('-').collect();
+    let mut cy: i32 = parts[0].parse().unwrap_or(2024);
+    let mut cm: u32 = parts[1].parse().unwrap_or(1);
+
+    let mut data: Vec<serde_json::Value> = Vec::with_capacity(months as usize);
+    for _ in 0..months {
+        let key = format!("{:04}-{:02}", cy, cm);
+        let (inc, exp) = data_map.get(&key).copied().unwrap_or((Decimal::ZERO, Decimal::ZERO));
+        data.push(json!({
+            "month": key,
+            "income": inc,
+            "expense": exp,
+            "balance": inc - exp,
+        }));
+        let (ny, nm) = if cm == 12 { (cy + 1, 1) } else { (cy, cm + 1) };
+        cy = ny;
+        cm = nm;
+    }
+
+    Ok(HttpResponse::Ok().json(ApiResponse::success(json!({
+        "months_count": months,
+        "data": data,
     }))))
 }
 
