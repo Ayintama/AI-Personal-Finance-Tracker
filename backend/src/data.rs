@@ -348,6 +348,41 @@ pub async fn total_budget(pool: &MySqlPool, user_id: i64, month: &str) -> sqlx::
 }
 
 // ==================== Statistics ====================
+
+/// 根据 "YYYY-MM" 计算该月的起止 DATETIME 字符串
+pub fn month_range(month: &str) -> (String, String) {
+    let start = format!("{}-01 00:00:00", month);
+    let parts: Vec<&str> = month.split('-').collect();
+    let y: i32 = parts[0].parse().unwrap_or(2024);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let end = format!("{:04}-{:02}-01 00:00:00", ny, nm);
+    (start, end)
+}
+
+/// 当前月份往前推 N 个月，返回起始月份 "YYYY-MM"
+pub fn months_ago(n: i32) -> String {
+    let now = Local::now();
+    let total = now.year() * 12 + (now.month() as i32) - 1 - n + 1;
+    let y = (total - 1) / 12;
+    let m = ((total - 1) % 12) + 1;
+    format!("{:04}-{:02}", y, m)
+}
+
+/// 计算某月天数
+pub fn days_in_month(month: &str) -> u32 {
+    let parts: Vec<&str> = month.split('-').collect();
+    let y: i32 = parts[0].parse().unwrap_or(2024);
+    let m: u32 = parts[1].parse().unwrap_or(1);
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    if let Some(next_first) = chrono::NaiveDate::from_ymd_opt(ny, nm, 1) {
+        if let Some(last_day) = next_first.pred_opt() {
+            return last_day.day();
+        }
+    }
+    30
+}
+
 pub async fn month_summary(
     pool: &MySqlPool,
     user_id: i64,
@@ -416,6 +451,138 @@ pub async fn category_expense_summary(
     .bind(&start)
     .bind(&next_month_end)
     .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn category_income_summary(
+    pool: &MySqlPool,
+    user_id: i64,
+    month: &str,
+) -> sqlx::Result<Vec<(String, Decimal)>> {
+    let (start, end) = month_range(month);
+    let rows: Vec<(String, Decimal)> = sqlx::query_as(
+        "SELECT c.name, COALESCE(SUM(t.amount), 0) AS amount
+         FROM categories c
+         LEFT JOIN transactions t ON t.category_id = c.id
+             AND t.user_id = ? AND t.transaction_type = 'income'
+             AND t.occurred_at >= ? AND t.occurred_at < ?
+         WHERE c.category_type = 'income' AND (c.user_id IS NULL OR c.user_id = ?)
+         GROUP BY c.id, c.name
+         HAVING amount > 0
+         ORDER BY amount DESC"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn monthly_transaction_count(
+    pool: &MySqlPool,
+    user_id: i64,
+    month: &str,
+) -> sqlx::Result<i64> {
+    let (start, end) = month_range(month);
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM transactions WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+pub async fn max_single_expense(
+    pool: &MySqlPool,
+    user_id: i64,
+    month: &str,
+) -> sqlx::Result<Option<Decimal>> {
+    let (start, end) = month_range(month);
+    let val = sqlx::query_scalar::<_, Decimal>(
+        "SELECT MAX(amount) FROM transactions WHERE user_id = ? AND transaction_type = 'expense' AND occurred_at >= ? AND occurred_at < ?"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
+    .fetch_optional(pool)
+    .await?;
+    Ok(val)
+}
+
+pub async fn yearly_summary(
+    pool: &MySqlPool,
+    user_id: i64,
+    year: i32,
+) -> sqlx::Result<Vec<(String, Decimal, Decimal)>> {
+    let start = format!("{:04}-01-01 00:00:00", year);
+    let end = format!("{:04}-01-01 00:00:00", year + 1);
+    let rows: Vec<(String, Decimal, Decimal)> = sqlx::query_as(
+        "SELECT DATE_FORMAT(occurred_at, '%Y-%m') AS mth,
+                COALESCE(SUM(CASE WHEN transaction_type = 'income' THEN amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END), 0)
+         FROM transactions
+         WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?
+         GROUP BY DATE_FORMAT(occurred_at, '%Y-%m')
+         ORDER BY mth"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn daily_summary(
+    pool: &MySqlPool,
+    user_id: i64,
+    month: &str,
+) -> sqlx::Result<Vec<(String, Decimal, Decimal)>> {
+    let (start, end) = month_range(month);
+    let rows: Vec<(String, Decimal, Decimal)> = sqlx::query_as(
+        "SELECT DATE_FORMAT(occurred_at, '%Y-%m-%d') AS dy,
+                COALESCE(SUM(CASE WHEN transaction_type = 'income' THEN amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END), 0)
+         FROM transactions
+         WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?
+         GROUP BY DATE_FORMAT(occurred_at, '%Y-%m-%d')
+         ORDER BY dy"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn trend_summary(
+    pool: &MySqlPool,
+    user_id: i64,
+    months: i32,
+) -> sqlx::Result<Vec<(String, Decimal, Decimal)>> {
+    let start = months_ago(months);
+    let now = Local::now();
+    let end = format!("{:04}-{:02}-01 00:00:00", now.year(), if now.month() == 12 { 1 } else { now.month() + 1 });
+    let rows: Vec<(String, Decimal, Decimal)> = sqlx::query_as(
+        "SELECT DATE_FORMAT(occurred_at, '%Y-%m') AS mth,
+                COALESCE(SUM(CASE WHEN transaction_type = 'income' THEN amount ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END), 0)
+         FROM transactions
+         WHERE user_id = ? AND occurred_at >= ? AND occurred_at < ?
+         GROUP BY DATE_FORMAT(occurred_at, '%Y-%m')
+         ORDER BY mth"
+    )
+    .bind(user_id)
+    .bind(&start)
+    .bind(&end)
     .fetch_all(pool)
     .await?;
     Ok(rows)

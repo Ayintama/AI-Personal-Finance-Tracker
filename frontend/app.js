@@ -668,7 +668,7 @@ function parseHtmlTable(text) {
 }
 
 async function parseImportedRows(matrix) {
-  if (matrix.length < 2) return [];
+  if (matrix.length < 2) return { rows: [], skipped: 0 };
   const headers = matrix[0].map((item) => String(item).replace(/^\uFEFF/, "").trim());
   const indexOf = (...names) => headers.findIndex((header) => names.includes(header));
   const dateIndex = indexOf("日期", "时间", "交易时间", "date", "Date", "time", "Time");
@@ -684,6 +684,7 @@ async function parseImportedRows(matrix) {
   }
 
   const rows = [];
+  let skipped = 0;
   for (const row of matrix.slice(1)) {
     const rawAmount = Number(String(row[amountIndex] || "").replace(/[￥,\s]/g, ""));
     const rawCategory = categoryIndex >= 0 ? String(row[categoryIndex] || "").replace(/^\uFEFF/, "").trim() : "";
@@ -694,12 +695,12 @@ async function parseImportedRows(matrix) {
     const date = normalizeDate(row[dateIndex]);
     const amount = Math.abs(rawAmount);
     const remark = remarkIndex >= 0 ? String(row[remarkIndex] || "").trim() : "";
-    if (!type || !date || !Number.isFinite(amount) || amount <= 0) continue;
+    if (!type || !date || !Number.isFinite(amount) || amount <= 0) { skipped++; continue; }
     const category = await ensureCategory(type, rawCategory, remark, amount);
-    if (!category) continue;
+    if (!category) { skipped++; continue; }
     rows.push({ type, amount, categoryId: category.id, category: category.name, date, remark });
   }
-  return rows;
+  return { rows, skipped };
 }
 
 async function importTableFile(file) {
@@ -716,13 +717,15 @@ async function importTableFile(file) {
   const text = await file.text();
   const matrix = extension === "csv" ? parseCsv(text) : parseHtmlTable(text);
   els.importStatus.textContent = "正在解析表格...";
-  const imported = await parseImportedRows(matrix);
+  const { rows: imported, skipped } = await parseImportedRows(matrix);
   if (!imported.length) {
-    els.importStatus.textContent = "没有识别到有效账单，请检查时间、金额是否有值。";
+    const skipMsg = skipped > 0 ? `，跳过 ${skipped} 条无效行` : "";
+    els.importStatus.textContent = `没有识别到有效账单，请检查时间、金额是否有值。${skipMsg}`;
     return;
   }
 
-  els.importStatus.textContent = `识别到 ${imported.length} 条账单，正在导入...`;
+  const skipNote = skipped > 0 ? `（跳过 ${skipped} 条无效行）` : "";
+  els.importStatus.textContent = `识别到 ${imported.length} 条账单${skipNote}，正在导入...`;
   let count = 0;
   for (const row of imported) {
     await apiRequest("/api/transactions", {
@@ -740,7 +743,8 @@ async function importTableFile(file) {
       els.importStatus.textContent = `正在导入 ${count} / ${imported.length} 条账单...`;
     }
   }
-  els.importStatus.textContent = `已导入 ${count} 条账单到后端。`;
+  const doneMsg = skipped > 0 ? `已导入 ${count} 条账单到后端，跳过 ${skipped} 条无效行。` : `已导入 ${count} 条账单到后端。`;
+  els.importStatus.textContent = doneMsg;
   await refreshData();
 }
 
@@ -782,9 +786,44 @@ els.monthInput.addEventListener("change", async () => {
   saveUiState();
   await refreshData();
 });
+function showFieldError(inputEl, message) {
+  clearFieldError(inputEl);
+  if (!message) return;
+  const err = document.createElement("span");
+  err.className = "field-error";
+  err.textContent = message;
+  inputEl.classList.add("input-error");
+  inputEl.parentNode.appendChild(err);
+}
+
+function clearFieldError(inputEl) {
+  inputEl.classList.remove("input-error");
+  const existing = inputEl.parentNode.querySelector(".field-error");
+  if (existing) existing.remove();
+}
+
 els.typeInput.addEventListener("change", updateCategoryOptions);
 els.remarkInput.addEventListener("input", updateCategoryOptions);
-els.amountInput.addEventListener("input", updateCategoryOptions);
+els.amountInput.addEventListener("input", () => {
+  updateCategoryOptions();
+  const val = parseFloat(els.amountInput.value);
+  if (!els.amountInput.value) {
+    clearFieldError(els.amountInput);
+  } else if (!Number.isFinite(val) || val <= 0) {
+    showFieldError(els.amountInput, "金额必须大于 0");
+  } else if (val > 9999999.99) {
+    showFieldError(els.amountInput, "金额不能超过 9,999,999.99");
+  } else {
+    clearFieldError(els.amountInput);
+  }
+});
+els.dateInput.addEventListener("change", () => {
+  if (!els.dateInput.value) {
+    showFieldError(els.dateInput, "请选择日期");
+  } else {
+    clearFieldError(els.dateInput);
+  }
+});
 els.filterType.addEventListener("change", renderRecords);
 els.selectAllRecords.addEventListener("change", () => {
   const filter = els.filterType.value;
@@ -866,6 +905,17 @@ els.recordForm.addEventListener("submit", async (event) => {
   }
   const amount = Number(els.amountInput.value);
   if (!Number.isFinite(amount) || amount <= 0) return;
+  if (amount > 9999999.99) {
+    showFieldError(els.amountInput, "金额不能超过 9,999,999.99");
+    return;
+  }
+  if (!els.dateInput.value) {
+    showFieldError(els.dateInput, "请选择日期");
+    return;
+  }
+  const btn = els.recordForm.querySelector(".primary-btn");
+  btn.disabled = true;
+  btn.textContent = "保存中...";
   try {
     await apiRequest("/api/transactions", {
       method: "POST",
@@ -879,15 +929,25 @@ els.recordForm.addEventListener("submit", async (event) => {
     });
     els.recordForm.reset();
     els.dateInput.value = getToday();
+    els.amountInput.value = "";
+    els.remarkInput.value = "";
+    clearFieldError(els.amountInput);
+    clearFieldError(els.dateInput);
     await refreshData();
   } catch (error) {
     els.importStatus.textContent = error.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存账单";
   }
 });
 
 els.budgetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.token) return;
+  const btn = els.budgetForm.querySelector(".primary-btn");
+  btn.disabled = true;
+  btn.textContent = "保存中...";
   try {
     await apiRequest("/api/budgets", {
       method: "POST",
@@ -900,6 +960,9 @@ els.budgetForm.addEventListener("submit", async (event) => {
     await refreshData();
   } catch (error) {
     els.budgetAdvice.textContent = error.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存预算";
   }
 });
 
