@@ -460,15 +460,320 @@ pub struct ClassifyReq {
     pub transaction_type: String,
 }
 
-const RULES: &[(&str, &[&str])] = &[
-    ("餐饮", &["午餐", "晚餐", "早餐", "外卖", "饭", "奶茶", "咖啡", "食堂"]),
-    ("交通", &["地铁", "打车", "滴滴", "公交", "高铁", "机票", "出租", "加油"]),
-    ("购物", &["淘宝", "京东", "购物", "衣服", "超市", "拼多多"]),
-    ("学习", &["书", "课程", "学费", "资料", "考试"]),
-    ("娱乐", &["电影", "游戏", "会员", "旅游", "演唱会"]),
-    ("医疗", &["药", "医院", "门诊", "体检"]),
-    ("住房", &["房租", "水电", "物业", "宽带"]),
+struct ClassifyRule {
+    tx_type: &'static str,
+    category_name: &'static str,
+    keywords: &'static [&'static str],
+    confidence: f64,
+}
+
+const CLASSIFY_RULES: &[ClassifyRule] = &[
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "餐饮",
+        keywords: &[
+            "早餐", "午餐", "晚餐", "外卖", "饭", "奶茶", "咖啡", "食堂", "火锅",
+        ],
+        confidence: 0.90,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "交通",
+        keywords: &[
+            "地铁", "公交", "打车", "滴滴", "出租", "高铁", "火车", "机票", "加油",
+        ],
+        confidence: 0.90,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "购物",
+        keywords: &["淘宝", "京东", "拼多多", "购物", "衣服", "鞋", "超市"],
+        confidence: 0.88,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "学习",
+        keywords: &["书", "课程", "学费", "资料", "考试", "培训"],
+        confidence: 0.88,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "娱乐",
+        keywords: &["电影", "游戏", "会员", "旅游", "演唱会", "KTV"],
+        confidence: 0.86,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "医疗",
+        keywords: &["药", "医院", "门诊", "体检", "挂号"],
+        confidence: 0.90,
+    },
+    ClassifyRule {
+        tx_type: "expense",
+        category_name: "住房",
+        keywords: &["房租", "水电", "物业", "宽带", "燃气"],
+        confidence: 0.92,
+    },
+    ClassifyRule {
+        tx_type: "income",
+        category_name: "工资",
+        keywords: &["工资", "薪资", "薪水", "工资到账"],
+        confidence: 0.95,
+    },
+    ClassifyRule {
+        tx_type: "income",
+        category_name: "奖金",
+        keywords: &["奖金", "绩效", "年终奖"],
+        confidence: 0.92,
+    },
+    ClassifyRule {
+        tx_type: "income",
+        category_name: "兼职",
+        keywords: &["兼职", "外包", "稿费", "劳务费"],
+        confidence: 0.88,
+    },
+    ClassifyRule {
+        tx_type: "income",
+        category_name: "报销",
+        keywords: &["报销", "补贴"],
+        confidence: 0.88,
+    },
+    ClassifyRule {
+        tx_type: "income",
+        category_name: "理财",
+        keywords: &["利息", "基金", "分红", "收益", "理财"],
+        confidence: 0.86,
+    },
 ];
+
+#[derive(Debug, Deserialize)]
+struct AiClassifyOutput {
+    category_name: String,
+    confidence: Option<f64>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiReportOutput {
+    summary: Option<String>,
+    highlights: Option<Vec<String>>,
+    risks: Option<Vec<String>>,
+    saving_tips: Option<Vec<String>>,
+    budget_status: Option<String>,
+}
+
+fn chat_completion_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+fn parse_ai_json(content: &str) -> Option<serde_json::Value> {
+    let mut text = content.trim();
+    if text.starts_with("```") {
+        text = text
+            .trim_start_matches("```json")
+            .trim_start_matches("```JSON")
+            .trim_start_matches("```")
+            .trim();
+        if let Some(end) = text.rfind("```") {
+            text = &text[..end];
+        }
+    }
+    serde_json::from_str(text.trim()).ok()
+}
+
+fn clamp_confidence(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
+}
+
+async fn call_ai_classify(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    tx_type: &str,
+    amount: Decimal,
+    remark: &str,
+    category_names: &[String],
+) -> Option<(String, f64, String)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .ok()?;
+
+    let prompt = format!(
+        "你是个人记账分类助手。请根据账单类型、金额、备注，从候选分类中选择最合适的一个分类。
+只能返回 JSON，不要 Markdown，不要解释性长文本。
+只能从候选分类中选择，不能新增分类，不能返回候选分类之外的名称。
+
+账单类型：{}
+金额：{}
+备注：{}
+候选分类：{}
+
+JSON 返回格式：
+{{\"category_name\":\"分类名\",\"confidence\":0.0到1.0之间,\"reason\":\"简短原因\"}}",
+        tx_type,
+        amount,
+        remark,
+        category_names.join("、")
+    );
+
+    let resp = client
+        .post(chat_completion_url(base_url))
+        .bearer_auth(api_key.trim())
+        .json(&json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是个人财务记账分类助手。必须输出 JSON，且只能从用户给出的候选分类中选择一个分类。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.2,
+            "response_format": { "type": "json_object" }
+        }))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let value: serde_json::Value = resp.json().await.ok()?;
+    let content = value["choices"][0]["message"]["content"].as_str()?.trim();
+    let parsed: AiClassifyOutput = serde_json::from_value(parse_ai_json(content)?).ok()?;
+    let category_name = parsed.category_name.trim().to_string();
+    if !category_names.iter().any(|name| name == &category_name) {
+        return None;
+    }
+
+    Some((
+        category_name,
+        clamp_confidence(parsed.confidence.unwrap_or(0.75)),
+        parsed.reason.unwrap_or_else(|| "AI 推荐分类".to_string()),
+    ))
+}
+
+fn report_items(report: &AiReportOutput) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(summary) = &report.summary {
+        if !summary.trim().is_empty() {
+            out.push(summary.trim().to_string());
+        }
+    }
+    if let Some(items) = &report.highlights {
+        out.extend(items.iter().filter(|s| !s.trim().is_empty()).cloned());
+    }
+    if let Some(items) = &report.risks {
+        out.extend(items.iter().filter(|s| !s.trim().is_empty()).cloned());
+    }
+    if let Some(items) = &report.saving_tips {
+        out.extend(items.iter().filter(|s| !s.trim().is_empty()).cloned());
+    }
+    if let Some(status) = &report.budget_status {
+        if !status.trim().is_empty() {
+            out.push(status.trim().to_string());
+        }
+    }
+    out
+}
+
+async fn call_ai_report(
+    api_key: &str,
+    base_url: &str,
+    model: &str,
+    month: &str,
+    income: Decimal,
+    expense: Decimal,
+    balance: Decimal,
+    category_totals: &[(String, Decimal)],
+    budget_usage: Option<i64>,
+    suggestions: &[String],
+) -> Option<AiReportOutput> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+
+    let category_summary = if category_totals.is_empty() {
+        "暂无".to_string()
+    } else {
+        category_totals
+            .iter()
+            .map(|(name, amount)| format!("{}：{}元", name, amount))
+            .collect::<Vec<_>>()
+            .join("；")
+    };
+
+    let prompt = format!(
+        "你是个人财务分析助手。请根据下面的月度财务摘要，生成中文 JSON 财务分析报告。
+要求：
+1. 只根据给定统计摘要分析，不要编造数据；
+2. 不要出现用户名、邮箱、用户 ID、JWT、API key；
+3. 不给投资、贷款、医疗、法律等高风险建议；
+4. 输出必须是 JSON，不要 Markdown；
+5. JSON 字段固定为 summary、highlights、risks、saving_tips、budget_status。
+
+月份：{}
+收入：{}
+支出：{}
+结余：{}
+分类支出汇总：{}
+预算使用率：{}
+本地规则建议：{}
+
+JSON 返回格式：
+{{\"summary\":\"一句话总结\",\"highlights\":[\"消费亮点\"],\"risks\":[\"风险提醒\"],\"saving_tips\":[\"省钱建议\"],\"budget_status\":\"预算状态\"}}",
+        month,
+        income,
+        expense,
+        balance,
+        category_summary,
+        budget_usage
+            .map(|v| format!("{}%", v))
+            .unwrap_or_else(|| "未设置预算".to_string()),
+        suggestions.join("；")
+    );
+
+    let resp = client
+        .post(chat_completion_url(base_url))
+        .bearer_auth(api_key.trim())
+        .json(&json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是个人财务分析助手。必须输出 JSON，只能基于用户提供的统计摘要生成建议，不要编造不存在的数据。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.4,
+            "response_format": { "type": "json_object" }
+        }))
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let value: serde_json::Value = resp.json().await.ok()?;
+    let content = value["choices"][0]["message"]["content"].as_str()?.trim();
+    let report: AiReportOutput = serde_json::from_value(parse_ai_json(content)?).ok()?;
+    if report_items(&report).is_empty() {
+        None
+    } else {
+        Some(report)
+    }
+}
 
 pub async fn ai_report(
     state: web::Data<data::AppState>,
@@ -517,6 +822,63 @@ pub async fn ai_report(
         suggestions.push("继续保持良好的记账习惯！".into());
     }
 
+    let budget_usage = if let Some(b) = total_budget {
+        if b > Decimal::ZERO {
+            let percent = (expense / b) * Decimal::from(100);
+            Some(percent.to_string().parse::<f64>().unwrap_or(0.0).round() as i64)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let local_summary = format!(
+        "{} 月财务总结：本月收入 {} 元，支出 {} 元，结余 {} 元。{}",
+        month,
+        income,
+        expense,
+        income - expense,
+        suggestions.join("；")
+    );
+    let mut summary_text = local_summary.clone();
+    let mut source = "fallback";
+    let mut ai_status = if state.ai_enabled {
+        "missing_api_key"
+    } else {
+        "disabled"
+    };
+    let mut generated_by_ai = false;
+
+    if state.ai_enabled {
+        if let Some(api_key) = &state.ai_api_key {
+            ai_status = "request_failed";
+            if let Some(ai_report) = call_ai_report(
+                api_key,
+                &state.ai_base_url,
+                &state.ai_model,
+                &month,
+                income,
+                expense,
+                income - expense,
+                &cats,
+                budget_usage,
+                &suggestions,
+            )
+            .await
+            {
+                let ai_items = report_items(&ai_report);
+                if !ai_items.is_empty() {
+                    suggestions = ai_items;
+                }
+                summary_text = ai_report.summary.unwrap_or(local_summary);
+                source = "deepseek";
+                ai_status = "success";
+                generated_by_ai = true;
+            }
+        }
+    }
+
     let budget_json = if let Some(b) = total_budget {
         let percent = (expense / b) * Decimal::from(100);
         let usage_percent = percent.to_string().parse::<f64>().unwrap_or(0.0).round() as i64;
@@ -532,8 +894,11 @@ pub async fn ai_report(
         "balance": income - expense,
         "top_category": cats.first().map(|c| c.0.clone()),
         "budget": budget_json,
+        "summary_text": summary_text,
+        "source": source,
+        "ai_status": ai_status,
         "suggestions": suggestions,
-        "generated_by_ai": false,
+        "generated_by_ai": generated_by_ai,
     }))))
 }
 
@@ -546,18 +911,65 @@ pub async fn ai_classify(
     let cats = data::list_categories(&state.pool, user_id).await?;
 
     let remark_lower = body.remark.to_lowercase();
-    let tx_type = if body.transaction_type == "income" { "income" } else { "expense" };
+    let tx_type = match body.transaction_type.as_str() {
+        "income" => "income",
+        "expense" => "expense",
+        _ => return Err(AppError::BadRequest("type 必须是 income 或 expense".into())),
+    };
 
-    if tx_type == "expense" {
-        for &(name, keywords) in RULES {
-            for kw in keywords {
-                if remark_lower.contains(&kw.to_lowercase()) {
-                    if let Some(c) = cats.iter().find(|c| c.category_type == "expense" && c.name == name) {
+    for rule in CLASSIFY_RULES {
+        if rule.tx_type != tx_type {
+            continue;
+        }
+
+        for kw in rule.keywords {
+            if remark_lower.contains(&kw.to_lowercase()) {
+                if let Some(c) = cats
+                    .iter()
+                    .find(|c| c.category_type == tx_type && c.name == rule.category_name)
+                {
+                    return Ok(HttpResponse::Ok().json(ApiResponse::success(json!({
+                        "category_id": c.id,
+                        "category_name": c.name,
+                        "confidence": rule.confidence,
+                        "source": "rule",
+                        "reason": format!("备注命中关键词：{}，推荐分类为{}", kw, c.name),
+                    }))));
+                }
+            }
+        }
+    }
+
+    if state.ai_enabled {
+        if let Some(api_key) = &state.ai_api_key {
+            let candidate_names: Vec<String> = cats
+                .iter()
+                .filter(|c| c.category_type == tx_type)
+                .map(|c| c.name.clone())
+                .collect();
+
+            if !candidate_names.is_empty() {
+                if let Some((ai_category_name, confidence, reason)) = call_ai_classify(
+                    api_key,
+                    &state.ai_base_url,
+                    &state.ai_model,
+                    tx_type,
+                    body.amount,
+                    &body.remark,
+                    &candidate_names,
+                )
+                .await
+                {
+                    if let Some(c) = cats
+                        .iter()
+                        .find(|c| c.category_type == tx_type && c.name == ai_category_name)
+                    {
                         return Ok(HttpResponse::Ok().json(ApiResponse::success(json!({
                             "category_id": c.id,
                             "category_name": c.name,
-                            "confidence": 0.9,
-                            "source": "rule",
+                            "confidence": confidence,
+                            "source": "deepseek",
+                            "reason": reason,
                         }))));
                     }
                 }
@@ -576,6 +988,7 @@ pub async fn ai_classify(
             "category_name": c.name,
             "confidence": 0.5,
             "source": "fallback",
+            "reason": "本地规则未命中，AI 不可用或返回无效，使用默认分类",
         })))),
         None => Err(AppError::NotFound("未找到匹配的分类".into())),
     }

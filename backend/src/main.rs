@@ -27,6 +27,10 @@ async fn main() -> std::io::Result<()> {
     let app_state = web::Data::new(data::AppState {
         pool,
         jwt_secret: cfg.jwt_secret.clone(),
+        ai_enabled: cfg.ai_enabled,
+        ai_api_key: cfg.ai_api_key.clone(),
+        ai_model: cfg.ai_model.clone(),
+        ai_base_url: cfg.ai_base_url.clone(),
     });
 
     let host = cfg.server_host.clone();

@@ -535,10 +535,17 @@ async function generateReport() {
       body: JSON.stringify({ month: state.selectedMonth }),
     });
     state.report = report;
+    const aiStatusText = {
+      success: "由 AI 服务生成",
+      disabled: "AI 未启用，已使用本地规则",
+      missing_api_key: "缺少 AI API Key，已使用本地规则",
+      request_failed: "AI 请求失败，已使用本地规则",
+    }[report.ai_status] || (report.generated_by_ai ? "由 AI 服务生成" : "由本地规则生成");
     els.aiReport.innerHTML = `
       <h4>${escapeHtml(report.month)} 财务总结</h4>
       <p>本月收入 ${formatMoney(report.income)}，支出 ${formatMoney(report.expense)}，结余 ${formatMoney(report.balance)}。</p>
-      <p>最高支出类别：${escapeHtml(report.top_category || "暂无")}。${report.generated_by_ai ? "由 AI 服务生成。" : "由本地规则生成。"}</p>
+      <p>最高支出类别：${escapeHtml(report.top_category || "暂无")}。${escapeHtml(aiStatusText)}。</p>
+      ${report.summary_text ? `<p>${escapeHtml(report.summary_text)}</p>` : ""}
       <h4>优化建议</h4>
       <ul>${(report.suggestions || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
     `;

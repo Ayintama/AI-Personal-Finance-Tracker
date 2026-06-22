@@ -6,6 +6,10 @@ use sqlx::{mysql::MySqlPool, FromRow};
 pub struct AppState {
     pub pool: MySqlPool,
     pub jwt_secret: String,
+    pub ai_enabled: bool,
+    pub ai_api_key: Option<String>,
+    pub ai_model: String,
+    pub ai_base_url: String,
 }
 
 // ==================== User ====================
