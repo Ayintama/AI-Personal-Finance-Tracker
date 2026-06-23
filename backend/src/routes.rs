@@ -242,6 +242,11 @@ pub async fn create_transaction(
     if body.transaction_type != "income" && body.transaction_type != "expense" {
         return Err(AppError::BadRequest("type 必须是 income 或 expense".into()));
     }
+    if let Some(ref remark) = body.remark {
+        if remark.len() > 255 {
+            return Err(AppError::BadRequest("备注不能超过 255 个字符".into()));
+        }
+    }
 
     let cat = data::get_category(&state.pool, body.category_id).await?
         .ok_or_else(|| AppError::BadRequest("分类不存在".into()))?;
@@ -289,6 +294,12 @@ pub async fn update_transaction(
 
     if amount > Decimal::new(9999999, 2) {
         return Err(AppError::BadRequest("金额超出最大限制 (9999999.99)".into()));
+    }
+
+    if let Some(ref remark) = body.remark {
+        if remark.len() > 255 {
+            return Err(AppError::BadRequest("备注不能超过 255 个字符".into()));
+        }
     }
 
     if body.category_id.is_some() {
@@ -388,9 +399,10 @@ pub async fn create_or_update_budget(
     if body.amount < Decimal::ZERO {
         return Err(AppError::BadRequest("预算金额不能为负数".into()));
     }
-    if body.month.len() != 7 || !body.month.contains('-') {
-        return Err(AppError::BadRequest("月份格式应为 YYYY-MM".into()));
+    if body.amount > Decimal::new(99999999, 2) {
+        return Err(AppError::BadRequest("预算金额不能超过 99,999,999.99".into()));
     }
+    validate_month(&body.month)?;
 
     if let Some(cid) = body.category_id {
         let cat = data::get_category(&state.pool, cid).await?
@@ -601,15 +613,18 @@ pub async fn trend_statistics(
 ) -> Result<HttpResponse, AppError> {
     let user_id = uid(&req)?;
     let months = q.months.unwrap_or(6).max(1).min(24);
+    // months_ago(N) returns N months before current; we want to include current month
+    // so pass months-1 to get a range that includes this month
+    let query_months = (months - 1).max(0);
 
-    let rows = data::trend_summary(&state.pool, user_id, months).await?;
+    let rows = data::trend_summary(&state.pool, user_id, query_months).await?;
 
     let mut data_map: std::collections::HashMap<String, (Decimal, Decimal)> = std::collections::HashMap::new();
     for (mth, inc, exp) in &rows {
         data_map.insert(mth.clone(), (*inc, *exp));
     }
 
-    let start = data::months_ago(months);
+    let start = data::months_ago(query_months);
     let parts: Vec<&str> = start.split('-').collect();
     let mut cy: i32 = parts[0].parse().unwrap_or(2024);
     let mut cm: u32 = parts[1].parse().unwrap_or(1);
@@ -1180,5 +1195,205 @@ pub async fn ai_classify(
             "reason": "本地规则未命中，AI 不可用或返回无效，使用默认分类",
         })))),
         None => Err(AppError::NotFound("未找到匹配的分类".into())),
+    }
+}
+
+// ========================= tests =========================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_month ──
+    #[test]
+    fn test_validate_month_valid() {
+        assert!(validate_month("2024-01").is_ok());
+        assert!(validate_month("2024-06").is_ok());
+        assert!(validate_month("2024-12").is_ok());
+        assert!(validate_month("2025-03").is_ok());
+    }
+
+    #[test]
+    fn test_validate_month_length() {
+        assert!(validate_month("2024-1").is_err());
+        assert!(validate_month("2024").is_err());
+        assert!(validate_month("2024-01-01").is_err());
+    }
+
+    #[test]
+    fn test_validate_month_no_dash() {
+        assert!(validate_month("202401").is_err());
+    }
+
+    #[test]
+    fn test_validate_month_non_digit() {
+        assert!(validate_month("202a-01").is_err());
+        assert!(validate_month("2024-0a").is_err());
+        assert!(validate_month("abcd-ef").is_err());
+    }
+
+    #[test]
+    fn test_validate_month_invalid_month() {
+        assert!(validate_month("2024-00").is_err());
+        assert!(validate_month("2024-13").is_err());
+        assert!(validate_month("2024-99").is_err());
+    }
+
+    // ── Serialization tests ──
+    #[test]
+    fn test_stats_query_deserialize() {
+        let json = r#"{"month": "2024-06"}"#;
+        let q: StatsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.month, "2024-06");
+    }
+
+    #[test]
+    fn test_yearly_stats_query_deserialize() {
+        let json = r#"{"year": 2024}"#;
+        let q: YearlyStatsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.year, 2024);
+    }
+
+    #[test]
+    fn test_daily_stats_query_deserialize() {
+        let json = r#"{"month": "2024-06"}"#;
+        let q: DailyStatsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.month, "2024-06");
+    }
+
+    #[test]
+    fn test_trend_stats_query_deserialize_default() {
+        let json = r#"{}"#;
+        let q: TrendStatsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.months, None);
+    }
+
+    #[test]
+    fn test_trend_stats_query_deserialize() {
+        let json = r#"{"months": 12}"#;
+        let q: TrendStatsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.months, Some(12));
+    }
+
+    #[test]
+    fn test_tx_view_serialization() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2024, 6, 15)
+            .unwrap()
+            .and_hms_opt(12, 30, 0)
+            .unwrap();
+        let t = TransactionWithCategory {
+            id: 1,
+            user_id: 100,
+            category_id: 5,
+            category_name: "餐饮".into(),
+            amount: Decimal::new(5000, 2),
+            transaction_type: "expense".into(),
+            occurred_at: dt,
+            remark: Some("午餐".into()),
+        };
+        let view = to_tx_view(t);
+        assert_eq!(view.id, 1);
+        assert_eq!(view.category_id, 5);
+        assert_eq!(view.category_name, "餐饮");
+        assert_eq!(view.transaction_type, "expense");
+        assert_eq!(view.occurred_at, "2024-06-15 12:30:00");
+        assert_eq!(view.remark, Some("午餐".into()));
+    }
+
+    #[test]
+    fn test_budget_view_usage_percent() {
+        let b = BudgetRow {
+            id: 1,
+            user_id: 100,
+            category_id: Some(5),
+            category_name: "餐饮".into(),
+            amount: Decimal::new(100000, 2),
+            month: "2024-06".into(),
+            spent: Decimal::new(30000, 2),
+        };
+        let view = to_budget_view(b);
+        assert_eq!(view.usage_percent, 30);
+        assert_eq!(view.remaining, Decimal::new(70000, 2));
+    }
+
+    #[test]
+    fn test_budget_view_zero_amount() {
+        let b = BudgetRow {
+            id: 1,
+            user_id: 100,
+            category_id: None,
+            category_name: "".into(),
+            amount: Decimal::ZERO,
+            month: "2024-06".into(),
+            spent: Decimal::new(5000, 2),
+        };
+        let view = to_budget_view(b);
+        assert_eq!(view.usage_percent, 0);
+        assert_eq!(view.category_name, "总预算");
+    }
+
+    #[test]
+    fn test_budget_view_rounding() {
+        // spent / amount = 0.10 / 3.00 = 3.33% → rounds to 3%
+        let b = BudgetRow {
+            id: 1,
+            user_id: 100,
+            category_id: Some(5),
+            category_name: "餐饮".into(),
+            amount: Decimal::new(300, 2),  // 3.00
+            month: "2024-06".into(),
+            spent: Decimal::new(10, 2),    // 0.10 → 3.33%
+        };
+        let view = to_budget_view(b);
+        assert_eq!(view.usage_percent, 3);
+    }
+
+    // ── Request validation tests (边界值) ──
+    #[test]
+    fn test_create_tx_req_deserialize() {
+        let json = r#"{
+            "category_id": 1,
+            "amount": "99.99",
+            "type": "expense",
+            "occurred_at": "2024-06-15 12:30:00",
+            "remark": "午餐"
+        }"#;
+        let req: CreateTxReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.category_id, 1);
+        assert_eq!(req.amount, Decimal::new(9999, 2));
+        assert_eq!(req.transaction_type, "expense");
+    }
+
+    #[test]
+    fn test_create_budget_req_deserialize() {
+        let json = r#"{
+            "category_id": null,
+            "amount": "5000.00",
+            "month": "2024-06"
+        }"#;
+        let req: CreateBudgetReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.category_id, None);
+        assert_eq!(req.amount, Decimal::new(500000, 2));
+        assert_eq!(req.month, "2024-06");
+    }
+
+    #[test]
+    fn test_report_req_deserialize() {
+        let json = r#"{"month": "2024-06"}"#;
+        let req: ReportReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.month, "2024-06");
+    }
+
+    #[test]
+    fn test_classify_req_deserialize() {
+        let json = r#"{
+            "remark": "午餐外卖",
+            "amount": "35.50",
+            "type": "expense"
+        }"#;
+        let req: ClassifyReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.remark, "午餐外卖");
+        assert_eq!(req.amount, Decimal::new(3550, 2));
     }
 }

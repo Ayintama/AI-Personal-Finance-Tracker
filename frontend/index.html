@@ -98,7 +98,23 @@
                 <h3>分类支出</h3>
                 <span id="categoryHint">按本月支出统计</span>
               </div>
-              <div id="categoryBars" class="bar-list"></div>
+              <div id="categoryPieChart" class="chart-container"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h3>月度趋势</h3>
+                <span>近 6 个月收支变化</span>
+              </div>
+              <div id="trendLineChart" class="chart-container"></div>
+            </section>
+          </div>
+          <div class="content-grid" style="margin-top: 18px;">
+            <section class="panel">
+              <div class="panel-header">
+                <h3>收支构成</h3>
+                <span id="barChartHint">本月每日收支</span>
+              </div>
+              <div id="dailyBarChart" class="chart-container"></div>
             </section>
             <section class="panel">
               <div class="panel-header">
@@ -232,6 +248,7 @@
       </main>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

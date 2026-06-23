@@ -95,6 +95,7 @@ where
         let path = req.path().to_string();
         let is_public = req.method() == Method::OPTIONS
             || path == "/health"
+            || !path.starts_with("/api/")
             || path == "/api/auth/register"
             || path == "/api/auth/login";
 

@@ -25,7 +25,11 @@ let state = {
   categories: [],
   summary: emptySummary(),
   report: null,
+  trendData: null,
+  dailyData: null,
 };
+
+const chartInstances = {};
 
 const selectedRecordIds = new Set();
 
@@ -50,6 +54,11 @@ const els = {
   balanceMetric: document.querySelector("#balanceMetric"),
   budgetMetric: document.querySelector("#budgetMetric"),
   categoryBars: document.querySelector("#categoryBars"),
+  categoryPieChart: document.querySelector("#categoryPieChart"),
+  trendLineChart: document.querySelector("#trendLineChart"),
+  dailyBarChart: document.querySelector("#dailyBarChart"),
+  barChartHint: document.querySelector("#barChartHint"),
+  categoryHint: document.querySelector("#categoryHint"),
   recentRecords: document.querySelector("#recentRecords"),
   recordForm: document.querySelector("#recordForm"),
   typeInput: document.querySelector("#typeInput"),
@@ -304,6 +313,20 @@ async function refreshData() {
     selectedRecordIds.clear();
     state.summary = summary || emptySummary();
     state.report = null;
+
+    // 获取趋势和每日数据（不阻塞主渲染）
+    try {
+      const [trend, daily] = await Promise.all([
+        apiRequest("/api/statistics/trend?months=6"),
+        apiRequest(`/api/statistics/daily?month=${encodeURIComponent(state.selectedMonth)}`),
+      ]);
+      state.trendData = trend;
+      state.dailyData = daily;
+    } catch {
+      state.trendData = null;
+      state.dailyData = null;
+    }
+
     renderAll();
     els.apiStatus.textContent = "已连接后端";
   } catch (error) {
@@ -388,32 +411,146 @@ function renderMetrics() {
   els.budgetMetric.textContent = summary.budget ? `${summary.budgetUsage}%` : "未设置";
 }
 
-function renderCategoryBars() {
+// ==================== ECharts 图表 ====================
+
+function ensureChart(domEl, key) {
+  if (!domEl) return null;
+  // 先销毁旧实例，确保每次渲染都是全新配置
+  let instance = chartInstances[key];
+  if (instance && !instance.isDisposed()) {
+    instance.dispose();
+  }
+  instance = echarts.init(domEl);
+  chartInstances[key] = instance;
+  return instance;
+}
+
+function disposeAllCharts() {
+  Object.values(chartInstances).forEach((inst) => {
+    if (inst && !inst.isDisposed()) inst.dispose();
+  });
+  Object.keys(chartInstances).forEach((k) => delete chartInstances[k]);
+}
+
+function renderCategoryPieChart() {
+  const chart = ensureChart(els.categoryPieChart, "categoryPie");
+  if (!chart) return;
+
   const summary = getSummary();
   const entries = Object.entries(summary.categoryTotals).sort((a, b) => b[1] - a[1]);
-  const max = Math.max(...entries.map(([, amount]) => amount), 1);
 
-  if (!state.token) {
-    els.categoryBars.innerHTML = `<div class="empty">登录后查看分类支出。</div>`;
+  if (!state.token || entries.length === 0) {
+    chart.setOption({
+      title: { text: state.token ? "暂无数据" : "请先登录", left: "center", top: "center", textStyle: { color: "#999", fontSize: 14 } },
+      series: [],
+    });
+    if (els.categoryHint) els.categoryHint.textContent = state.token ? "本月暂无支出" : "需要登录";
     return;
   }
-  if (entries.length === 0) {
-    els.categoryBars.innerHTML = `<div class="empty">本月还没有支出记录。</div>`;
+
+  const total = entries.reduce((sum, [, v]) => sum + v, 0);
+  if (els.categoryHint) els.categoryHint.textContent = `共 ${formatMoney(total)} · ${entries.length} 个分类`;
+
+  chart.setOption({
+    tooltip: { trigger: "item", formatter: (p) => `${p.name}: ${formatMoney(p.value)} (${p.percent}%)` },
+    legend: { type: "scroll", orient: "vertical", right: 8, top: 20, bottom: 20, textStyle: { fontSize: 12 } },
+    series: [{
+      type: "pie",
+      radius: ["45%", "75%"],
+      center: ["40%", "55%"],
+      avoidLabelOverlap: false,
+      itemStyle: { borderRadius: 4, borderColor: "#fff", borderWidth: 2 },
+      label: { show: false },
+      emphasis: { label: { show: true, fontSize: 14, fontWeight: "bold" } },
+      data: entries.map(([name, value]) => ({ name, value })),
+    }],
+  });
+}
+
+function renderTrendLineChart() {
+  const chart = ensureChart(els.trendLineChart, "trendLine");
+  if (!chart) return;
+
+  const data = state.trendData?.data || [];
+  if (!state.token || data.length === 0) {
+    chart.setOption({
+      title: { text: state.token ? "暂无数据" : "请先登录", left: "center", top: "center", textStyle: { color: "#999", fontSize: 14 } },
+      series: [],
+    });
     return;
   }
 
-  els.categoryBars.innerHTML = entries
-    .map(([name, amount]) => {
-      const width = Math.max(6, Math.round((amount / max) * 100));
-      return `
-        <div class="bar-row">
-          <strong>${escapeHtml(name)}</strong>
-          <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
-          <span>${formatMoney(amount)}</span>
-        </div>
-      `;
-    })
-    .join("");
+  const months = data.map((d) => d.month);
+  const incomes = data.map((d) => Number(d.income));
+  const expenses = data.map((d) => Number(d.expense));
+
+  chart.setOption({
+    tooltip: { trigger: "axis", formatter: (params) => {
+      const income = params.find((p) => p.seriesName === "收入");
+      const expense = params.find((p) => p.seriesName === "支出");
+      return `${params[0].axisValue}<br/>${income ? "收入 " + formatMoney(income.value) : ""}<br/>${expense ? "支出 " + formatMoney(expense.value) : ""}`;
+    }},
+    legend: { data: ["收入", "支出"], bottom: 0 },
+    grid: { left: 54, right: 16, top: 12, bottom: 62 },
+    xAxis: { type: "category", data: months, axisLabel: { rotate: 30, fontSize: 10 } },
+    yAxis: { type: "value", axisLabel: { formatter: (v) => v >= 10000 ? `${(v/10000).toFixed(1)}万` : v } },
+    series: [
+      { name: "收入", type: "line", data: incomes, smooth: true, symbol: "circle", symbolSize: 6,
+        lineStyle: { color: "#126c57" }, itemStyle: { color: "#126c57" }, areaStyle: { color: "rgba(18,108,87,0.08)" } },
+      { name: "支出", type: "line", data: expenses, smooth: true, symbol: "circle", symbolSize: 6,
+        lineStyle: { color: "#b94e2f" }, itemStyle: { color: "#b94e2f" }, areaStyle: { color: "rgba(185,78,47,0.06)" } },
+    ],
+  });
+}
+
+function renderDailyBarChart() {
+  const chart = ensureChart(els.dailyBarChart, "dailyBar");
+  if (!chart) return;
+
+  const days = state.dailyData?.days || [];
+  if (!state.token || days.length === 0) {
+    chart.setOption({
+      title: { text: state.token ? "暂无数据" : "请先登录", left: "center", top: "center", textStyle: { color: "#999", fontSize: 14 } },
+      series: [],
+    });
+    if (els.barChartHint) els.barChartHint.textContent = state.token ? "本月暂无收支" : "需要登录";
+    return;
+  }
+
+  if (els.barChartHint) els.barChartHint.textContent = `本月共 ${state.dailyData?.total_days || days.length} 天`;
+
+  const dates = days.map((d) => d.date.slice(-2) + "日");
+  const incomes = days.map((d) => Number(d.income));
+  const expenses = days.map((d) => Number(d.expense));
+
+  chart.setOption({
+    tooltip: { trigger: "axis", formatter: (params) => {
+      const income = params.find((p) => p.seriesName === "收入");
+      const expense = params.find((p) => p.seriesName === "支出");
+      return `${params[0].axisValue}<br/>${income ? "收入 " + formatMoney(income.value) : ""}<br/>${expense ? "支出 " + formatMoney(expense.value) : ""}`;
+    }},
+    legend: { data: ["收入", "支出"], bottom: 0 },
+    grid: { left: 54, right: 16, top: 12, bottom: 62 },
+    xAxis: { type: "category", data: dates, axisLabel: { interval: 4, fontSize: 10 } },
+    yAxis: { type: "value", axisLabel: { formatter: (v) => v >= 10000 ? `${(v/10000).toFixed(1)}万` : v } },
+    series: [
+      { name: "收入", type: "bar", data: incomes, barMaxWidth: 14,
+        itemStyle: { color: "#126c57", borderRadius: [3, 3, 0, 0] } },
+      { name: "支出", type: "bar", data: expenses, barMaxWidth: 14,
+        itemStyle: { color: "#b94e2f", borderRadius: [3, 3, 0, 0] } },
+    ],
+  });
+}
+
+function renderCategoryBars() {
+  // 旧版 CSS 条形图已废弃，使用 ECharts 饼图
+  renderCategoryPieChart();
+}
+
+function renderAllCharts() {
+  if (els.categoryPieChart) renderCategoryPieChart();
+  if (els.trendLineChart) renderTrendLineChart();
+  if (els.dailyBarChart) renderDailyBarChart();
 }
 
 function renderRecords() {
@@ -752,7 +889,7 @@ function renderAll() {
   els.monthInput.value = state.selectedMonth;
   renderAuthState();
   renderMetrics();
-  renderCategoryBars();
+  renderAllCharts();
   renderRecords();
   renderBudget();
   updateCategoryOptions();
@@ -803,7 +940,15 @@ function clearFieldError(inputEl) {
 }
 
 els.typeInput.addEventListener("change", updateCategoryOptions);
-els.remarkInput.addEventListener("input", updateCategoryOptions);
+els.remarkInput.addEventListener("input", () => {
+  updateCategoryOptions();
+  const val = els.remarkInput.value;
+  if (val.length > 255) {
+    showFieldError(els.remarkInput, "备注不能超过 255 个字符");
+  } else {
+    clearFieldError(els.remarkInput);
+  }
+});
 els.amountInput.addEventListener("input", () => {
   updateCategoryOptions();
   const val = parseFloat(els.amountInput.value);
@@ -904,13 +1049,24 @@ els.recordForm.addEventListener("submit", async (event) => {
     return;
   }
   const amount = Number(els.amountInput.value);
-  if (!Number.isFinite(amount) || amount <= 0) return;
+  if (!Number.isFinite(amount) || amount <= 0) {
+    showFieldError(els.amountInput, "金额必须大于 0");
+    return;
+  }
   if (amount > 9999999.99) {
     showFieldError(els.amountInput, "金额不能超过 9,999,999.99");
     return;
   }
+  if (!els.categoryInput.value) {
+    showFieldError(els.categoryInput, "请选择分类");
+    return;
+  }
   if (!els.dateInput.value) {
     showFieldError(els.dateInput, "请选择日期");
+    return;
+  }
+  if (els.remarkInput.value.length > 255) {
+    showFieldError(els.remarkInput, "备注不能超过 255 个字符");
     return;
   }
   const btn = els.recordForm.querySelector(".primary-btn");
@@ -942,9 +1098,31 @@ els.recordForm.addEventListener("submit", async (event) => {
   }
 });
 
+els.budgetInput.addEventListener("input", () => {
+  const val = parseFloat(els.budgetInput.value);
+  if (!els.budgetInput.value) {
+    clearFieldError(els.budgetInput);
+  } else if (!Number.isFinite(val) || val < 0) {
+    showFieldError(els.budgetInput, "预算金额不能为负数");
+  } else if (val > 99999999.99) {
+    showFieldError(els.budgetInput, "预算金额不能超过 99,999,999.99");
+  } else {
+    clearFieldError(els.budgetInput);
+  }
+});
+
 els.budgetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.token) return;
+  const budgetAmount = parseFloat(els.budgetInput.value || "0");
+  if (!Number.isFinite(budgetAmount) || budgetAmount < 0) {
+    showFieldError(els.budgetInput, "请输入有效的预算金额（不能为负数）");
+    return;
+  }
+  if (budgetAmount > 99999999.99) {
+    showFieldError(els.budgetInput, "预算金额不能超过 99,999,999.99");
+    return;
+  }
   const btn = els.budgetForm.querySelector(".primary-btn");
   btn.disabled = true;
   btn.textContent = "保存中...";
@@ -980,5 +1158,11 @@ async function init() {
     }
   }
 }
+
+window.addEventListener("resize", () => {
+  Object.values(chartInstances).forEach((inst) => {
+    if (inst && !inst.isDisposed()) inst.resize();
+  });
+});
 
 init();

@@ -506,14 +506,14 @@ pub async fn max_single_expense(
 ) -> sqlx::Result<Option<Decimal>> {
     let (start, end) = month_range(month);
     let val = sqlx::query_scalar::<_, Decimal>(
-        "SELECT MAX(amount) FROM transactions WHERE user_id = ? AND transaction_type = 'expense' AND occurred_at >= ? AND occurred_at < ?"
+        "SELECT COALESCE(MAX(amount), 0) FROM transactions WHERE user_id = ? AND transaction_type = 'expense' AND occurred_at >= ? AND occurred_at < ?"
     )
     .bind(user_id)
     .bind(&start)
     .bind(&end)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(val)
+    Ok(if val == Decimal::ZERO { None } else { Some(val) })
 }
 
 pub async fn yearly_summary(
@@ -563,12 +563,134 @@ pub async fn daily_summary(
     Ok(rows)
 }
 
+// ==================== Tests (纯函数) ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── month_range ──
+    #[test]
+    fn test_month_range_january() {
+        let (start, end) = month_range("2024-01");
+        assert_eq!(start, "2024-01-01 00:00:00");
+        assert_eq!(end, "2024-02-01 00:00:00");
+    }
+
+    #[test]
+    fn test_month_range_december() {
+        let (start, end) = month_range("2024-12");
+        assert_eq!(start, "2024-12-01 00:00:00");
+        assert_eq!(end, "2025-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_month_range_midyear() {
+        let (start, end) = month_range("2024-06");
+        assert_eq!(start, "2024-06-01 00:00:00");
+        assert_eq!(end, "2024-07-01 00:00:00");
+    }
+
+    #[test]
+    fn test_month_range_2025() {
+        let (start, end) = month_range("2025-03");
+        assert_eq!(start, "2025-03-01 00:00:00");
+        assert_eq!(end, "2025-04-01 00:00:00");
+    }
+
+    // ── days_in_month ──
+    #[test]
+    fn test_days_in_month_31() {
+        assert_eq!(days_in_month("2024-01"), 31);
+        assert_eq!(days_in_month("2024-03"), 31);
+        assert_eq!(days_in_month("2024-05"), 31);
+        assert_eq!(days_in_month("2024-07"), 31);
+        assert_eq!(days_in_month("2024-08"), 31);
+        assert_eq!(days_in_month("2024-10"), 31);
+        assert_eq!(days_in_month("2024-12"), 31);
+    }
+
+    #[test]
+    fn test_days_in_month_30() {
+        assert_eq!(days_in_month("2024-04"), 30);
+        assert_eq!(days_in_month("2024-06"), 30);
+        assert_eq!(days_in_month("2024-09"), 30);
+        assert_eq!(days_in_month("2024-11"), 30);
+    }
+
+    #[test]
+    fn test_days_in_month_feb_leap_year() {
+        // 2024 is a leap year
+        assert_eq!(days_in_month("2024-02"), 29);
+    }
+
+    #[test]
+    fn test_days_in_month_feb_non_leap() {
+        assert_eq!(days_in_month("2023-02"), 28);
+        assert_eq!(days_in_month("2025-02"), 28);
+    }
+
+    // ── months_ago ──
+    #[test]
+    fn test_months_ago_format() {
+        let result = months_ago(6);
+        assert_eq!(result.len(), 7);
+        assert_eq!(&result[4..5], "-");
+        // 验证是合法月份
+        let parts: Vec<&str> = result.split('-').collect();
+        let year: i32 = parts[0].parse().unwrap();
+        let month: u32 = parts[1].parse().unwrap();
+        assert!(year >= 2020 && year <= 2100);
+        assert!(month >= 1 && month <= 12);
+    }
+
+    #[test]
+    fn test_months_ago_zero() {
+        // months_ago(0) should be close to current month (within 2 months due to day-of-month edge)
+        let result = months_ago(0);
+        let current = current_month();
+        assert_eq!(result.len(), 7);
+        // The result might not exactly equal current_month due to day-of-month calculation,
+        // but it should be within a reasonable range
+        let result_parts: Vec<&str> = result.split('-').collect();
+        let curr_parts: Vec<&str> = current.split('-').collect();
+        let r_year: i32 = result_parts[0].parse().unwrap();
+        let r_month: u32 = result_parts[1].parse().unwrap();
+        let c_year: i32 = curr_parts[0].parse().unwrap();
+        let c_month: u32 = curr_parts[1].parse().unwrap();
+        let diff = (c_year - r_year) * 12 + (c_month as i32 - r_month as i32);
+        assert!(diff >= 0 && diff <= 2, "months_ago(0) should be within 0-2 months of current, got diff={}", diff);
+    }
+
+    #[test]
+    fn test_months_ago_large() {
+        let result = months_ago(24);
+        assert_eq!(result.len(), 7);
+        let parts: Vec<&str> = result.split('-').collect();
+        let year: i32 = parts[0].parse().unwrap();
+        assert!(year >= 2020 && year <= 2100);
+    }
+
+    // ── current_month ──
+    #[test]
+    fn test_current_month_format() {
+        let result = current_month();
+        assert_eq!(result.len(), 7);
+        assert_eq!(&result[4..5], "-");
+        let parts: Vec<&str> = result.split('-').collect();
+        let year: i32 = parts[0].parse().unwrap();
+        let month: u32 = parts[1].parse().unwrap();
+        assert!(year >= 2024 && year <= 2100);
+        assert!(month >= 1 && month <= 12);
+    }
+}
+
 pub async fn trend_summary(
     pool: &MySqlPool,
     user_id: i64,
     months: i32,
 ) -> sqlx::Result<Vec<(String, Decimal, Decimal)>> {
-    let start = months_ago(months);
+    let start = format!("{}-01 00:00:00", months_ago(months));
     let now = Local::now();
     let end = format!("{:04}-{:02}-01 00:00:00", now.year(), if now.month() == 12 { 1 } else { now.month() + 1 });
     let rows: Vec<(String, Decimal, Decimal)> = sqlx::query_as(

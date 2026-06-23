@@ -1,4 +1,5 @@
 use actix_cors::Cors;
+use actix_files as fs;
 use actix_web::{web, App, HttpServer};
 use dotenvy::dotenv;
 
@@ -72,6 +73,7 @@ async fn main() -> std::io::Result<()> {
                     .route("/ai/report", web::post().to(routes::ai_report))
                     .route("/ai/classify", web::post().to(routes::ai_classify))
             )
+            .service(fs::Files::new("/", "../frontend").index_file("index.html"))
     })
     .bind((host, port))?
     .run()
